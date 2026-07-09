@@ -1,0 +1,8 @@
+output/*
+!output/.gitkeep
+queries.txt
+.env
+*.log
+node_modules/
+.DS_Store
+Thumbs.db
