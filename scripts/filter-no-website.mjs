@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /**
- * Split gosom/google-maps-scraper CSV output into:
- * - no-website-leads.csv  (best for web-design / digital outreach via phone)
- * - with-website-leads.csv (optional email enrichment targets)
+ * Build no-website lead list with:
+ * 1) confirmed no real website
+ * 2) location
+ * 3) any contact: phone, email, or WhatsApp
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
@@ -16,11 +17,52 @@ const inputArg = process.argv[2];
 const inputPath = resolve(inputArg ?? resolve(root, "output", "results.csv"));
 const outDir = resolve(root, "output");
 
+const OUT_HEADERS = [
+  "business_name",
+  "has_website",
+  "location",
+  "address",
+  "latitude",
+  "longitude",
+  "phone",
+  "email",
+  "whatsapp",
+  "all_contacts",
+  "category",
+  "google_maps_link",
+  "review_rating",
+  "review_count",
+];
+
 const WEBSITE_KEYS = ["website", "web_site", "site", "url", "website_url"];
 const NAME_KEYS = ["title", "name", "business_name"];
 const PHONE_KEYS = ["phone", "phone_number", "telephone"];
 const EMAIL_KEYS = ["emails", "email"];
-const ADDRESS_KEYS = ["address", "complete_address", "full_address"];
+const ADDRESS_KEYS = ["complete_address", "address", "full_address"];
+const LAT_KEYS = ["latitude", "lat"];
+const LNG_KEYS = ["longitude", "lng", "lon"];
+const CATEGORY_KEYS = ["category", "type"];
+const LINK_KEYS = ["link", "google_maps_link", "maps_link"];
+const RATING_KEYS = ["review_rating", "rating"];
+const REVIEW_COUNT_KEYS = ["review_count", "reviews"];
+const TEXT_KEYS = ["about", "descriptions", "description", "order_online", "menu"];
+
+const SOCIAL_ONLY_HOSTS = [
+  "facebook.com",
+  "fb.com",
+  "fb.me",
+  "instagram.com",
+  "tiktok.com",
+  "linkedin.com",
+  "twitter.com",
+  "x.com",
+  "youtube.com",
+  "youtu.be",
+  "linktr.ee",
+  "wa.me",
+  "whatsapp.com",
+  "api.whatsapp.com",
+];
 
 function parseCsv(text) {
   const rows = [];
@@ -89,11 +131,14 @@ function pick(row, keys) {
   return "";
 }
 
-function hasWebsite(value) {
-  const v = String(value ?? "").trim().toLowerCase();
-  if (!v) return false;
-  if (v === "n/a" || v === "na" || v === "none" || v === "-") return false;
-  return v.includes(".") || v.startsWith("http");
+function pickAll(row, keys) {
+  const values = [];
+  for (const key of keys) {
+    if (row[key] !== undefined && String(row[key]).trim()) {
+      values.push(String(row[key]).trim());
+    }
+  }
+  return values;
 }
 
 function objectify(headers, row) {
@@ -111,6 +156,138 @@ function findHeader(headers, candidates) {
     if (hit) return hit;
   }
   return null;
+}
+
+function normalizeUrl(value) {
+  const v = String(value ?? "").trim();
+  if (!v) return "";
+  if (/^https?:\/\//i.test(v)) return v;
+  if (v.includes(".")) return `https://${v}`;
+  return v;
+}
+
+function hostOf(url) {
+  try {
+    return new URL(normalizeUrl(url)).hostname.replace(/^www\./, "").toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+function hasRealWebsite(value) {
+  const v = String(value ?? "").trim().toLowerCase();
+  if (!v) return false;
+  if (v === "n/a" || v === "na" || v === "none" || v === "-") return false;
+
+  const host = hostOf(v);
+  if (!host) return v.includes(".") && !SOCIAL_ONLY_HOSTS.some((s) => v.includes(s));
+
+  return !SOCIAL_ONLY_HOSTS.some((social) => host === social || host.endsWith(`.${social}`));
+}
+
+function digitsOnly(value) {
+  return String(value ?? "").replace(/\D/g, "");
+}
+
+function toWhatsAppLink(phone) {
+  const digits = digitsOnly(phone);
+  if (!digits) return "";
+
+  let normalized = digits;
+  if (normalized.startsWith("0") && normalized.length === 10) {
+    normalized = `27${normalized.slice(1)}`;
+  } else if (normalized.length === 9 && /^[67]/.test(normalized)) {
+    normalized = `27${normalized}`;
+  }
+
+  if (normalized.length < 10) return "";
+
+  return `https://wa.me/${normalized}`;
+}
+
+function extractEmailsFromText(...chunks) {
+  const found = new Set();
+  const re = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+
+  for (const chunk of chunks) {
+    const text = String(chunk ?? "");
+    const matches = text.match(re) ?? [];
+    for (const m of matches) {
+      const email = m.toLowerCase();
+      if (!email.includes("example.com") && !email.includes("sentry")) {
+        found.add(email);
+      }
+    }
+  }
+
+  return [...found];
+}
+
+function extractWhatsAppFromText(...chunks) {
+  for (const chunk of chunks) {
+    const text = String(chunk ?? "");
+    const waMe = text.match(/wa\.me\/(\+?\d{8,15})/i);
+    if (waMe) return `https://wa.me/${digitsOnly(waMe[1])}`;
+
+    const apiWa = text.match(/api\.whatsapp\.com\/send\?phone=(\+?\d{8,15})/i);
+    if (apiWa) return `https://wa.me/${digitsOnly(apiWa[1])}`;
+  }
+  return "";
+}
+
+function buildLocation(record, addressKey, latKey, lngKey) {
+  const complete = pick(record, ["complete_address"]);
+  const address = pick(record, ADDRESS_KEYS);
+  const lat = latKey ? record[latKey] : pick(record, LAT_KEYS);
+  const lng = lngKey ? record[lngKey] : pick(record, LNG_KEYS);
+
+  if (complete) return complete;
+  if (address) return address;
+  if (lat && lng) return `${lat}, ${lng}`;
+  return "";
+}
+
+function buildLead(record, keys) {
+  const name = pick(record, NAME_KEYS);
+  const phone = pick(record, PHONE_KEYS);
+  const textBlob = pickAll(record, TEXT_KEYS).join(" ");
+
+  const emails = [
+    ...extractEmailsFromText(pick(record, EMAIL_KEYS), textBlob),
+  ];
+  const email = emails.join("; ");
+
+  let whatsapp = extractWhatsAppFromText(textBlob);
+  if (!whatsapp && phone) whatsapp = toWhatsAppLink(phone);
+
+  const contacts = [];
+  if (phone) contacts.push(`phone: ${phone}`);
+  if (email) contacts.push(`email: ${email}`);
+  if (whatsapp) contacts.push(`whatsapp: ${whatsapp}`);
+
+  const address = pick(record, ADDRESS_KEYS);
+  const location = buildLocation(record, keys.address, keys.lat, keys.lng);
+
+  return {
+    business_name: name,
+    has_website: "no",
+    location,
+    address: pick(record, ["complete_address"]) || address,
+    latitude: keys.lat ? record[keys.lat] ?? "" : pick(record, LAT_KEYS),
+    longitude: keys.lng ? record[keys.lng] ?? "" : pick(record, LNG_KEYS),
+    phone,
+    email,
+    whatsapp,
+    all_contacts: contacts.join(" | "),
+    category: pick(record, CATEGORY_KEYS),
+    google_maps_link: pick(record, LINK_KEYS),
+    review_rating: pick(record, RATING_KEYS),
+    review_count: pick(record, REVIEW_COUNT_KEYS),
+  };
+}
+
+function hasAnyContact(lead) {
+  return Boolean(lead.phone || lead.email || lead.whatsapp);
 }
 
 if (!existsSync(inputPath)) {
@@ -135,56 +312,71 @@ const websiteKey =
   headers.find((h) => h.toLowerCase().includes("website")) ??
   "website";
 
-const noWebsite = [];
-const withWebsite = [];
+const keys = {
+  address: findHeader(headers, ADDRESS_KEYS),
+  lat: findHeader(headers, LAT_KEYS),
+  lng: findHeader(headers, LNG_KEYS),
+};
+
+const noWebsiteWithContact = [];
+const noWebsiteNoContact = [];
+let skippedHasWebsite = 0;
 
 for (const record of records) {
   const site = record[websiteKey] ?? "";
-  if (hasWebsite(site)) withWebsite.push(record);
-  else noWebsite.push(record);
+  if (hasRealWebsite(site)) {
+    skippedHasWebsite++;
+    continue;
+  }
+
+  const lead = buildLead(record, keys);
+  if (hasAnyContact(lead)) noWebsiteWithContact.push(lead);
+  else noWebsiteNoContact.push(lead);
 }
 
 mkdirSync(outDir, { recursive: true });
 
-const noWebsitePath = resolve(outDir, "no-website-leads.csv");
-const withWebsitePath = resolve(outDir, "with-website-leads.csv");
+const leadsPath = resolve(outDir, "no-website-leads.csv");
+const noContactPath = resolve(outDir, "no-website-no-contact.csv");
 const summaryPath = resolve(outDir, "summary.json");
 
-writeFileSync(noWebsitePath, toCsv(headers, noWebsite), "utf8");
-writeFileSync(withWebsitePath, toCsv(headers, withWebsite), "utf8");
+writeFileSync(leadsPath, toCsv(OUT_HEADERS, noWebsiteWithContact), "utf8");
+writeFileSync(noContactPath, toCsv(OUT_HEADERS, noWebsiteNoContact), "utf8");
 
-const sample = (list) =>
-  list.slice(0, 5).map((r) => ({
-    name: pick(r, NAME_KEYS),
-    phone: pick(r, PHONE_KEYS),
-    address: pick(r, ADDRESS_KEYS),
-    website: pick(r, WEBSITE_KEYS),
-    emails: pick(r, EMAIL_KEYS),
-  }));
+const withPhone = noWebsiteWithContact.filter((l) => l.phone).length;
+const withEmail = noWebsiteWithContact.filter((l) => l.email).length;
+const withWhatsApp = noWebsiteWithContact.filter((l) => l.whatsapp).length;
 
 const summary = {
   source: inputPath,
-  total: records.length,
-  noWebsite: noWebsite.length,
-  withWebsite: withWebsite.length,
-  websiteColumn: websiteKey,
+  priorities: ["no real website", "location", "any contact (phone/email/whatsapp)"],
+  totalScraped: records.length,
+  skippedHasWebsite,
+  noWebsiteWithContact: noWebsiteWithContact.length,
+  noWebsiteNoContact: noWebsiteNoContact.length,
+  contactBreakdown: {
+    phone: withPhone,
+    email: withEmail,
+    whatsapp: withWhatsApp,
+  },
   outputs: {
-    noWebsiteLeads: noWebsitePath,
-    withWebsiteLeads: withWebsitePath,
+    leads: leadsPath,
+    noContact: noContactPath,
   },
-  samples: {
-    noWebsite: sample(noWebsite),
-    withWebsite: sample(withWebsite),
-  },
+  samples: noWebsiteWithContact.slice(0, 5),
 };
 
 writeFileSync(summaryPath, JSON.stringify(summary, null, 2), "utf8");
 
 console.log("");
-console.log("Lead filter complete");
-console.log("--------------------");
-console.log(`Total scraped : ${summary.total}`);
-console.log(`No website    : ${summary.noWebsite}  -> ${noWebsitePath}`);
-console.log(`Has website   : ${summary.withWebsite}  -> ${withWebsitePath}`);
-console.log(`Summary       : ${summaryPath}`);
+console.log("No-website lead export");
+console.log("----------------------");
+console.log(`Scraped total          : ${summary.totalScraped}`);
+console.log(`Skipped (has website)  : ${summary.skippedHasWebsite}`);
+console.log(`No website + contact   : ${summary.noWebsiteWithContact} -> ${leadsPath}`);
+console.log(`No website, no contact : ${summary.noWebsiteNoContact} -> ${noContactPath}`);
+console.log(`  phone                : ${withPhone}`);
+console.log(`  email                : ${withEmail}`);
+console.log(`  whatsapp             : ${withWhatsApp}`);
+console.log(`Summary                : ${summaryPath}`);
 console.log("");

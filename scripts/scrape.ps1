@@ -4,7 +4,7 @@
   Run gosom/google-maps-scraper via Docker (free, fast, no API keys).
 
 .PARAMETER Email
-  Visit each business website and try to extract emails (-email flag).
+  Also crawl linked pages for emails when a listing has a site/social link (-email flag).
 
 .PARAMETER Depth
   Search depth (1 = faster, higher = more results per query).
@@ -13,7 +13,7 @@
   Parallel scrape jobs (-c). Start with 4; increase on a strong machine.
 #>
 param(
-    [switch]$Email,
+    [switch]$Email = $true,
     [int]$Depth = 1,
     [int]$Concurrency = 4,
     [string]$QueriesFile = "",
@@ -52,18 +52,16 @@ $dockerArgs = @(
     "-results", "/out/results.csv",
     "-depth", "$Depth",
     "-c", "$Concurrency",
-    "-exit-on-inactivity", "3m"
+    "-exit-on-inactivity", "3m",
+    "-email"
 )
-
-if ($Email) {
-    $dockerArgs += "-email"
-}
 
 Write-Host ""
 Write-Host "Google Maps scrape starting..."
 Write-Host "Queries : $Queries"
 Write-Host "Output  : $Results"
-Write-Host "Email   : $(if ($Email) { 'yes' } else { 'no (add -Email to enable)' })"
+Write-Host "Focus   : no website -> location -> phone/email/whatsapp"
+Write-Host "Email   : on (grabs any email found on linked pages)"
 Write-Host ""
 
 & docker @dockerArgs
