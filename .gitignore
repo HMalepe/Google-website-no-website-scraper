@@ -1,5 +1,7 @@
 output/*
 !output/.gitkeep
+data/jobs/*
+!data/.gitkeep
 queries.txt
 .env
 *.log

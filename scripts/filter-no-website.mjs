@@ -14,8 +14,9 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dirname, "..");
 
 const inputArg = process.argv[2];
+const outArg = process.argv[3];
 const inputPath = resolve(inputArg ?? resolve(root, "output", "results.csv"));
-const outDir = resolve(root, "output");
+const outDir = resolve(outArg ?? resolve(root, "output"));
 
 const OUT_HEADERS = [
   "business_name",

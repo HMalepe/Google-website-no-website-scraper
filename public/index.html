@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Lead Finder — No Website Dashboard</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="header">
+        <div>
+          <p class="eyebrow">Google Maps · No-website leads</p>
+          <h1>Lead Finder Dashboard</h1>
+          <p class="subtitle">
+            Find businesses with <strong>no website</strong>, their <strong>location</strong>, and
+            <strong>any contact</strong> (phone, email, WhatsApp).
+          </p>
+        </div>
+        <div class="status-pill" id="dockerStatus">Checking Docker…</div>
+      </header>
+
+      <section class="panel controls">
+        <div class="field">
+          <label for="location">Location</label>
+          <input id="location" type="text" value="Randburg" placeholder="e.g. Randburg" />
+        </div>
+
+        <div class="field field-wide">
+          <label>Business types to search</label>
+          <div class="chips" id="categoryChips"></div>
+        </div>
+
+        <div class="field field-wide">
+          <label for="customCategories">Extra searches (one per line, optional)</label>
+          <textarea
+            id="customCategories"
+            rows="3"
+            placeholder="beauty salons&#10;auto repair shops"
+          ></textarea>
+        </div>
+
+        <div class="actions">
+          <button class="btn btn-primary" id="startBtn">Start scrape</button>
+          <button class="btn btn-ghost" id="randburgBtn">Quick: Randburg pack</button>
+        </div>
+      </section>
+
+      <section class="stats" id="stats" hidden>
+        <div class="stat-card">
+          <span class="stat-label">No website + contact</span>
+          <span class="stat-value" id="statLeads">0</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">Phone</span>
+          <span class="stat-value" id="statPhone">0</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">Email</span>
+          <span class="stat-value" id="statEmail">0</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">WhatsApp</span>
+          <span class="stat-value" id="statWhatsapp">0</span>
+        </div>
+      </section>
+
+      <section class="panel progress-panel" id="progressPanel" hidden>
+        <div class="progress-head">
+          <h2>Scrape progress</h2>
+          <span class="badge" id="jobStatus">queued</span>
+        </div>
+        <div class="log" id="log"></div>
+      </section>
+
+      <section class="panel results-panel" id="resultsPanel" hidden>
+        <div class="results-head">
+          <h2>Leads</h2>
+          <button class="btn btn-ghost" id="downloadBtn">Download CSV</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Business</th>
+                <th>Location</th>
+                <th>Phone</th>
+                <th>Email</th>
+                <th>WhatsApp</th>
+                <th>Category</th>
+              </tr>
+            </thead>
+            <tbody id="leadsBody"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
