@@ -2,36 +2,28 @@
 
 **webscrape.selantra.co.za** — find businesses with no website in any city.
 
-Type a city → get location + phone / email / WhatsApp for businesses without a real website.
+## Go live (free or cheap VPS)
 
-## Live URL (after deploy)
+**Start here:** [deploy/VPS-SETUP.md](deploy/VPS-SETUP.md)
 
-https://webscrape.selantra.co.za
+| Plan | Cost | Best for |
+|------|------|----------|
+| **Oracle Cloud Johannesburg** | **Free forever** | SA users, 12 GB RAM |
+| **Hetzner CX23** | ~€4/mo | If Oracle is full |
 
-## Deploy online
-
-See **[deploy/DEPLOY.md](deploy/DEPLOY.md)** for VPS + DNS setup at domains.co.za.
-
-Quick version:
+One command on the server after signup:
 
 ```bash
-git clone https://github.com/HMalepe/Google-website-no-website-scraper.git
-cd Google-website-no-website-scraper
-cp .env.example .env   # set ACCESS_PASSWORD
-docker compose up -d --build
+curl -fsSL https://raw.githubusercontent.com/HMalepe/Google-website-no-website-scraper/main/deploy/setup-server.sh | bash
 ```
 
-DNS: `webscrape.selantra.co.za` → A record → your VPS IP.
+DNS at domains.co.za: `webscrape` → A record → your VPS IP.
 
 ## Local dev
 
 ```powershell
 .\start-dashboard.ps1
 ```
-
-## Engine
-
-[gosom/google-maps-scraper](https://github.com/gosom/google-maps-scraper) — free, self-hosted.
 
 ## License
 
