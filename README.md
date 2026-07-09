@@ -1,41 +1,37 @@
-# Google Website / No-Website Scraper
+# Selantra WebScrape
 
-Find **local businesses with no real website**, their **location**, and **any contact info** (phone, email, or WhatsApp).
+**webscrape.selantra.co.za** — find businesses with no website in any city.
 
-## Dashboard (recommended)
+Type a city → get location + phone / email / WhatsApp for businesses without a real website.
 
-Double-click **`start-dashboard.bat`** or run:
+## Live URL (after deploy)
+
+https://webscrape.selantra.co.za
+
+## Deploy online
+
+See **[deploy/DEPLOY.md](deploy/DEPLOY.md)** for VPS + DNS setup at domains.co.za.
+
+Quick version:
+
+```bash
+git clone https://github.com/HMalepe/Google-website-no-website-scraper.git
+cd Google-website-no-website-scraper
+cp .env.example .env   # set ACCESS_PASSWORD
+docker compose up -d --build
+```
+
+DNS: `webscrape.selantra.co.za` → A record → your VPS IP.
+
+## Local dev
 
 ```powershell
 .\start-dashboard.ps1
 ```
 
-Opens **http://localhost:3847** in your browser.
-
-1. Set location (default: **Randburg**)
-2. Pick business types (plumbers, electricians, etc.)
-3. Click **Start scrape**
-4. View leads in the table and **Download CSV**
-
-Requires **Docker Desktop** to be running.
-
-## What you get
-
-| Priority | Field |
-|----------|-------|
-| No website | Only businesses without a proper site (Facebook-only counts as no website) |
-| Location | `location`, `address`, GPS |
-| Contact | `phone`, `email`, `whatsapp` |
-
-## CLI (optional)
-
-```powershell
-.\scripts\run.ps1
-```
-
 ## Engine
 
-Built on [gosom/google-maps-scraper](https://github.com/gosom/google-maps-scraper) — free, self-hosted, no API keys.
+[gosom/google-maps-scraper](https://github.com/gosom/google-maps-scraper) — free, self-hosted.
 
 ## License
 

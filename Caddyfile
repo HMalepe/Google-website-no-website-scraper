@@ -1,0 +1,4 @@
+webscrape.selantra.co.za {
+	encode gzip
+	reverse_proxy webscrape:3847
+}

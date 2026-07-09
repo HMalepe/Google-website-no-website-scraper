@@ -4,6 +4,7 @@ data/jobs/*
 !data/.gitkeep
 queries.txt
 .env
+!.env.example
 *.log
 node_modules/
 .DS_Store

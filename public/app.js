@@ -5,24 +5,45 @@ const DEFAULT_CATEGORIES = [
   "restaurants",
   "dentists",
   "accountants",
-  "gyms",
-  "auto repair",
-];
-
-const RANDBURG_PACK = [
-  "plumbers",
-  "electricians",
-  "hair salons",
-  "restaurants",
   "beauty salons",
   "mechanics",
+  "gyms",
+  "lawyers",
 ];
 
 const $ = (id) => document.getElementById(id);
-const selected = new Set(["plumbers", "electricians", "hair salons"]);
+const selected = new Set();
 
 let currentJobId = null;
 let pollTimer = null;
+let authToken = sessionStorage.getItem("webscrape_token") || "";
+
+function authHeaders() {
+  if (!authToken) return { "Content-Type": "application/json" };
+  return {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${authToken}`,
+  };
+}
+
+async function api(path, options = {}) {
+  const res = await fetch(path, {
+    ...options,
+    headers: { ...authHeaders(), ...(options.headers || {}) },
+  });
+  const data = await res.json().catch(() => ({}));
+  return { res, data };
+}
+
+function showLogin() {
+  $("loginScreen").hidden = false;
+  $("app").hidden = true;
+}
+
+function showApp() {
+  $("loginScreen").hidden = true;
+  $("app").hidden = false;
+}
 
 function renderChips() {
   const wrap = $("categoryChips");
@@ -53,29 +74,53 @@ function getAllCategories() {
   return [...selected, ...getCustomCategories()];
 }
 
-async function checkHealth() {
-  const pill = $("dockerStatus");
-  try {
-    const res = await fetch("/api/health");
-    const data = await res.json();
-    if (data.docker) {
-      pill.textContent = "Docker ready";
-      pill.className = "status-pill ok";
-      $("startBtn").disabled = false;
-    } else {
-      pill.textContent = "Docker not running — open Docker Desktop";
-      pill.className = "status-pill bad";
-      $("startBtn").disabled = true;
+async function init() {
+  const { res, data } = await api("/api/health");
+
+  if (!res.ok) {
+    showLogin();
+    return;
+  }
+
+  if (data.authRequired && !authToken) {
+    showLogin();
+    return;
+  }
+
+  if (data.authRequired && authToken) {
+    const check = await api("/api/jobs");
+    if (check.res.status === 401) {
+      sessionStorage.removeItem("webscrape_token");
+      authToken = "";
+      showLogin();
+      return;
     }
-    if (data.activeJob) {
-      currentJobId = data.activeJob;
-      startPolling();
-    }
-  } catch {
-    pill.textContent = "Dashboard offline";
+  }
+
+  showApp();
+  updateEngineStatus(data);
+  if (data.activeJob) {
+    currentJobId = data.activeJob;
+    startPolling();
+  }
+}
+
+function updateEngineStatus(data) {
+  const pill = $("engineStatus");
+  if (data.docker) {
+    pill.textContent = "Online";
+    pill.className = "status-pill ok";
+    $("startBtn").disabled = false;
+  } else {
+    pill.textContent = "Engine offline";
     pill.className = "status-pill bad";
     $("startBtn").disabled = true;
   }
+}
+
+async function refreshHealth() {
+  const { res, data } = await api("/api/health");
+  if (res.ok && !$("app").hidden) updateEngineStatus(data);
 }
 
 function setJobStatus(status) {
@@ -101,26 +146,30 @@ function escapeHtml(value) {
 }
 
 async function startScrape() {
-  const location = $("location").value.trim() || "Randburg";
+  const location = $("city").value.trim();
+  if (!location) {
+    $("city").focus();
+    return;
+  }
+
   const categories = getAllCategories();
 
   $("startBtn").disabled = true;
   $("progressPanel").hidden = false;
   $("resultsPanel").hidden = true;
   $("stats").hidden = true;
+  $("scanCity").textContent = location;
   setJobStatus("starting");
   $("log").innerHTML = "";
 
-  const res = await fetch("/api/scrape", {
+  const { res, data } = await api("/api/scrape", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ location, categories }),
   });
 
-  const data = await res.json();
   if (!res.ok) {
     setJobStatus("failed");
-    renderLog([{ line: data.error || "Could not start scrape." }]);
+    renderLog([{ line: data.error || "Could not start scan." }]);
     $("startBtn").disabled = false;
     return;
   }
@@ -138,10 +187,10 @@ function startPolling() {
 async function pollJob() {
   if (!currentJobId) return;
 
-  const res = await fetch(`/api/jobs/${currentJobId}`);
-  const data = await res.json();
-  const job = data.job;
+  const { res, data } = await api(`/api/jobs/${currentJobId}`);
+  if (!res.ok) return;
 
+  const job = data.job;
   $("progressPanel").hidden = false;
   setJobStatus(job.status);
   renderLog(job.log || []);
@@ -149,6 +198,7 @@ async function pollJob() {
   if (job.status === "completed") {
     clearInterval(pollTimer);
     $("startBtn").disabled = false;
+    $("resultCity").textContent = job.location;
     await loadLeads(currentJobId);
   }
 
@@ -159,8 +209,9 @@ async function pollJob() {
 }
 
 async function loadLeads(jobId) {
-  const res = await fetch(`/api/leads/${jobId}`);
-  const data = await res.json();
+  const { res, data } = await api(`/api/leads/${jobId}`);
+  if (!res.ok) return;
+
   const leads = data.leads || [];
   const summary = data.summary;
 
@@ -175,7 +226,8 @@ async function loadLeads(jobId) {
 
   const body = $("leadsBody");
   if (leads.length === 0) {
-    body.innerHTML = `<tr><td colspan="6" class="empty">No leads with contact info found for this run.</td></tr>`;
+    body.innerHTML =
+      '<tr><td colspan="6" class="empty">No no-website leads with contact info found for this city.</td></tr>';
     return;
   }
 
@@ -198,7 +250,20 @@ async function loadLeads(jobId) {
     .join("");
 
   $("downloadBtn").onclick = () => {
-    window.location.href = `/api/download/${jobId}`;
+    const url = `/api/download/${jobId}`;
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "";
+    if (authToken) {
+      fetch(url, { headers: authHeaders() })
+        .then((r) => r.blob())
+        .then((blob) => {
+          a.href = URL.createObjectURL(blob);
+          a.click();
+        });
+    } else {
+      a.click();
+    }
   };
 }
 
@@ -206,15 +271,34 @@ function countField(leads, field) {
   return leads.filter((lead) => String(lead[field] || "").trim()).length;
 }
 
-function quickRandburg() {
-  $("location").value = "Randburg";
-  selected.clear();
-  for (const cat of RANDBURG_PACK) selected.add(cat);
-  renderChips();
-}
+$("loginForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const password = $("loginPassword").value;
+  const { res, data } = await api("/api/login", {
+    method: "POST",
+    body: JSON.stringify({ password }),
+  });
+
+  if (!res.ok) {
+    $("loginError").hidden = false;
+    $("loginError").textContent = data.error || "Login failed.";
+    return;
+  }
+
+  if (data.token) {
+    authToken = data.token;
+    sessionStorage.setItem("webscrape_token", authToken);
+  }
+
+  $("loginError").hidden = true;
+  await init();
+});
+
+$("city").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") startScrape();
+});
 
 renderChips();
 $("startBtn").addEventListener("click", startScrape);
-$("randburgBtn").addEventListener("click", quickRandburg);
-checkHealth();
-setInterval(checkHealth, 15000);
+init();
+setInterval(refreshHealth, 15000);
