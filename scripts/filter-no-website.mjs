@@ -21,6 +21,7 @@ const outDir = resolve(outArg ?? resolve(root, "output"));
 const OUT_HEADERS = [
   "business_name",
   "has_website",
+  "website",
   "social_profile",
   "location",
   "address",
@@ -284,6 +285,7 @@ function buildLead(record, keys, socialProfile) {
   return {
     business_name: name,
     has_website: "no",
+    website: "",
     social_profile: socialProfile || "",
     location,
     address: pick(record, ["complete_address"]) || address,
@@ -334,12 +336,18 @@ const keys = {
 
 const noWebsiteWithContact = [];
 const noWebsiteNoContact = [];
+const hasWebsiteLeads = [];
 let skippedHasWebsite = 0;
 
 for (const record of records) {
   const site = record[websiteKey] ?? "";
   if (hasRealWebsite(site)) {
     skippedHasWebsite++;
+    // Keep them: the website may be broken/outdated — audited in a later step.
+    const wLead = buildLead(record, keys, "");
+    wLead.has_website = "yes";
+    wLead.website = normalizeUrl(site);
+    hasWebsiteLeads.push(wLead);
     continue;
   }
 
@@ -352,10 +360,12 @@ mkdirSync(outDir, { recursive: true });
 
 const leadsPath = resolve(outDir, "no-website-leads.csv");
 const noContactPath = resolve(outDir, "no-website-no-contact.csv");
+const hasWebsitePath = resolve(outDir, "has-website.csv");
 const summaryPath = resolve(outDir, "summary.json");
 
 writeFileSync(leadsPath, toCsv(OUT_HEADERS, noWebsiteWithContact), "utf8");
 writeFileSync(noContactPath, toCsv(OUT_HEADERS, noWebsiteNoContact), "utf8");
+writeFileSync(hasWebsitePath, toCsv(OUT_HEADERS, hasWebsiteLeads), "utf8");
 
 const withPhone = noWebsiteWithContact.filter((l) => l.phone).length;
 const withEmail = noWebsiteWithContact.filter((l) => l.email).length;
@@ -378,6 +388,7 @@ const summary = {
   outputs: {
     leads: leadsPath,
     noContact: noContactPath,
+    hasWebsite: hasWebsitePath,
   },
   samples: noWebsiteWithContact.slice(0, 5),
 };

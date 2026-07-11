@@ -157,6 +157,7 @@ async function startScrape() {
   $("startBtn").disabled = true;
   $("progressPanel").hidden = false;
   $("resultsPanel").hidden = true;
+  $("badSitesPanel").hidden = true;
   $("stats").hidden = true;
   $("scanCity").textContent = location;
   setJobStatus("starting");
@@ -224,6 +225,8 @@ async function loadLeads(jobId) {
   $("statWhatsapp").textContent =
     summary?.contactBreakdown?.whatsapp ?? countField(leads, "whatsapp");
 
+  renderBadSites(data.badSites || [], jobId);
+
   const body = $("leadsBody");
   if (leads.length === 0) {
     body.innerHTML =
@@ -235,7 +238,7 @@ async function loadLeads(jobId) {
     .map(
       (lead) => `
       <tr>
-        <td><strong>${escapeHtml(lead.business_name || "—")}</strong>${renderDomain(lead)}</td>
+        <td><strong>${escapeHtml(lead.business_name || "—")}</strong>${renderBadges(lead)}${renderDomain(lead)}</td>
         <td>${renderScore(lead)}</td>
         <td>${renderRegistered(lead)}</td>
         <td>${escapeHtml(lead.location || lead.address || "—")}</td>
@@ -256,22 +259,7 @@ async function loadLeads(jobId) {
     )
     .join("");
 
-  $("downloadBtn").onclick = () => {
-    const url = `/api/download/${jobId}`;
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "";
-    if (authToken) {
-      fetch(url, { headers: authHeaders() })
-        .then((r) => r.blob())
-        .then((blob) => {
-          a.href = URL.createObjectURL(blob);
-          a.click();
-        });
-    } else {
-      a.click();
-    }
-  };
+  $("downloadBtn").onclick = () => downloadCsv(`/api/download/${jobId}`);
 }
 
 function renderRegistered(lead) {
@@ -284,6 +272,62 @@ function renderRegistered(lead) {
   const isNew = Number(year) >= new Date().getFullYear() - 2;
   const badge = isNew ? ' <span class="new-badge">NEW</span>' : "";
   return `<span title="${evidence}">${label}</span>${badge}`;
+}
+
+function renderBadges(lead) {
+  if (!String(lead.hiring_signal || "").trim()) return "";
+  return ` <span class="new-badge" title="${escapeHtml(lead.hiring_signal)} — growing business, likely has budget">HIRING</span>`;
+}
+
+function renderBadSites(badSites, jobId) {
+  const panel = $("badSitesPanel");
+  if (!badSites || badSites.length === 0) {
+    panel.hidden = true;
+    return;
+  }
+
+  panel.hidden = false;
+  $("badSitesBody").innerHTML = badSites
+    .map(
+      (lead) => `
+      <tr>
+        <td><strong>${escapeHtml(lead.business_name || "—")}</strong></td>
+        <td>${
+          lead.website
+            ? `<a href="${escapeHtml(lead.website)}" target="_blank" rel="noopener">${escapeHtml(
+                lead.website.replace(/^https?:\/\/(www\.)?/, "").replace(/\/$/, "")
+              )}</a>`
+            : "—"
+        }</td>
+        <td class="issues">${escapeHtml(lead.website_issues || "—")}</td>
+        <td>${escapeHtml(lead.phone || "—")}</td>
+        <td>${
+          lead.whatsapp
+            ? `<a href="${escapeHtml(lead.whatsapp)}" target="_blank" rel="noopener">Open</a>`
+            : "—"
+        }</td>
+        <td>${escapeHtml(lead.category || "—")}</td>
+      </tr>`
+    )
+    .join("");
+
+  $("downloadBadBtn").onclick = () => downloadCsv(`/api/download/${jobId}?file=bad`);
+}
+
+function downloadCsv(url) {
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "";
+  if (authToken) {
+    fetch(url, { headers: authHeaders() })
+      .then((r) => r.blob())
+      .then((blob) => {
+        a.href = URL.createObjectURL(blob);
+        a.click();
+      });
+  } else {
+    a.click();
+  }
 }
 
 function renderScore(lead) {

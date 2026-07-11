@@ -386,3 +386,9 @@ td a {
   font-weight: 600;
   color: #4ade80;
 }
+
+.issues {
+  max-width: 320px;
+  font-size: 0.85rem;
+  color: #f87171;
+}

@@ -311,6 +311,30 @@ async function runScrapeJob(job) {
       appendLog(job, `Date search skipped: ${err.message}`);
     }
 
+    job.status = "auditing";
+    saveJob(job);
+    appendLog(job, "Auditing existing websites for broken/outdated sites...");
+
+    try {
+      await runCommand(
+        "node",
+        [
+          join(ROOT, "scripts", "audit-websites.mjs"),
+          join(jobDir, "has-website.csv"),
+          jobDir,
+        ],
+        {
+          onStdout: (text) => {
+            for (const line of text.split(/\r?\n/)) {
+              if (line.trim()) appendLog(job, line.trim());
+            }
+          },
+        }
+      );
+    } catch (err) {
+      appendLog(job, `Website audit skipped: ${err.message}`);
+    }
+
     const summaryPath = join(jobDir, "summary.json");
     job.summary = existsSync(summaryPath)
       ? JSON.parse(readFileSync(summaryPath, "utf8"))
@@ -407,11 +431,13 @@ const server = createServer(async (req, res) => {
       if (!requireAuth(req, res)) return;
       const id = url.pathname.split("/")[3];
       const leadsPath = join(JOBS, id, "no-website-leads.csv");
+      const badSitesPath = join(JOBS, id, "bad-website-leads.csv");
       const job = loadJob(id);
       if (!job) return json(res, 404, { error: "Job not found" });
       return json(res, 200, {
         jobId: id,
         leads: csvToObjects(leadsPath),
+        badSites: csvToObjects(badSitesPath),
         summary: job.summary ?? null,
       });
     }
@@ -419,11 +445,13 @@ const server = createServer(async (req, res) => {
     if (req.method === "GET" && url.pathname.startsWith("/api/download/")) {
       if (!requireAuth(req, res)) return;
       const id = url.pathname.split("/")[3];
-      const leadsPath = join(JOBS, id, "no-website-leads.csv");
+      const wantBad = url.searchParams.get("file") === "bad";
+      const fileName = wantBad ? "bad-website-leads.csv" : "no-website-leads.csv";
+      const leadsPath = join(JOBS, id, fileName);
       if (!existsSync(leadsPath)) return json(res, 404, { error: "No leads file" });
       res.writeHead(200, {
         "Content-Type": "text/csv; charset=utf-8",
-        "Content-Disposition": `attachment; filename="no-website-leads-${id}.csv"`,
+        "Content-Disposition": `attachment; filename="${wantBad ? "bad-website" : "no-website"}-leads-${id}.csv"`,
       });
       res.end(readFileSync(leadsPath));
       return;

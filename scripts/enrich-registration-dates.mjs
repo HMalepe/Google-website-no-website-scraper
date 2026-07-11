@@ -52,6 +52,7 @@ const EXTRA_HEADERS = [
   "date_evidence",
   "suggested_domain",
   "domain_available",
+  "hiring_signal",
   "lead_score",
 ];
 
@@ -292,6 +293,17 @@ async function searchSnippets(query) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Growth = budget. Scan snippets we already fetched for hiring language —
+ * a free bonus signal, no extra search queries.
+ */
+export function extractHiringSignal(text) {
+  const m = String(text ?? "").match(
+    /\b(now hiring|we(?:'|’| a)re hiring|hiring now|vacanc(?:y|ies)|job opening|position(?:s)? available|join our team|looking for a [a-z ]{3,30})\b/i
+  );
+  return m ? m[1].toLowerCase() : "";
+}
+
 async function findRegistrationDate(name, place) {
   const base = place ? `"${name}" ${place}` : `"${name}"`;
   const queries = [
@@ -299,21 +311,23 @@ async function findRegistrationDate(name, place) {
     `${base} founded OR established OR opened OR "since"`,
   ];
 
+  let hiring = "";
   for (const query of queries) {
     const snippets = await searchSnippets(query);
     // Prefer high-confidence hits across all snippets before settling.
     let best = null;
     for (const snippet of snippets) {
+      if (!hiring) hiring = extractHiringSignal(snippet);
       const hit = extractRegistration(snippet);
       if (!hit) continue;
-      if (hit.confidence === "high") return hit;
+      if (hit.confidence === "high") return { hit, hiring };
       if (!best) best = hit;
     }
-    if (best) return best;
+    if (best) return { hit: best, hiring };
     await sleep(DELAY_MS);
   }
 
-  return null;
+  return { hit: null, hiring };
 }
 
 // ---------- Domain availability (.co.za) ----------
@@ -370,6 +384,8 @@ export function computeLeadScore(lead) {
   else if (reviews > 0) score += 5;
 
   if (lead.domain_available === "yes") score += 15;
+
+  if (String(lead.hiring_signal || "").trim()) score += 10;
 
   if (String(lead.phone || "").trim()) score += 5;
   if (String(lead.whatsapp || "").trim()) score += 5;
@@ -430,7 +446,8 @@ async function main() {
     const name = String(lead.business_name || "").trim();
     if (!name) continue;
 
-    const hit = await findRegistrationDate(name, location || lead.location || "");
+    const { hit, hiring } = await findRegistrationDate(name, location || lead.location || "");
+    if (hiring) lead.hiring_signal = hiring;
     if (hit) {
       lead.registered_date = hit.date;
       lead.registered_year = String(hit.year);

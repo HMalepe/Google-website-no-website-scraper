@@ -17,7 +17,16 @@ Each lead also gets:
 - **suggested_domain / domain_available** — a DNS check whether
   `businessname.co.za` is still unregistered (a ready-made pitch line)
 - **lead_score (0–100)** — company newness + social-only presence + review
-  sweet spot (4★+, real traffic, no site) + free domain + contactability
+  sweet spot (4★+, real traffic, no site) + free domain + hiring signal +
+  contactability
+- **hiring_signal** — "now hiring / vacancies / join our team" spotted in the
+  same search snippets (growth = budget)
+
+A second lead list, **bad-website-leads.csv**, audits businesses that *do*
+have a website and flags dead weight: lapsed domain, unreachable site, no
+SSL, not mobile-friendly, outdated copyright year, no analytics installed.
+Set `PAGESPEED_API_KEY` (free, official Google API) to also flag slow mobile
+scores. Tune with `AUDIT_MAX` / `AUDIT_TIMEOUT_MS`.
 
 ## Go live (free or cheap VPS)
 
