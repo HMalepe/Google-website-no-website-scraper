@@ -227,7 +227,7 @@ async function loadLeads(jobId) {
   const body = $("leadsBody");
   if (leads.length === 0) {
     body.innerHTML =
-      '<tr><td colspan="7" class="empty">No no-website leads with contact info found for this city.</td></tr>';
+      '<tr><td colspan="9" class="empty">No no-website leads with contact info found for this city.</td></tr>';
     return;
   }
 
@@ -235,7 +235,8 @@ async function loadLeads(jobId) {
     .map(
       (lead) => `
       <tr>
-        <td><strong>${escapeHtml(lead.business_name || "—")}</strong></td>
+        <td><strong>${escapeHtml(lead.business_name || "—")}</strong>${renderDomain(lead)}</td>
+        <td>${renderScore(lead)}</td>
         <td>${renderRegistered(lead)}</td>
         <td>${escapeHtml(lead.location || lead.address || "—")}</td>
         <td>${escapeHtml(lead.phone || "—")}</td>
@@ -243,6 +244,11 @@ async function loadLeads(jobId) {
         <td>${
           lead.whatsapp
             ? `<a href="${escapeHtml(lead.whatsapp)}" target="_blank" rel="noopener">Open</a>`
+            : "—"
+        }</td>
+        <td>${
+          lead.social_profile
+            ? `<a href="${escapeHtml(lead.social_profile)}" target="_blank" rel="noopener">${escapeHtml(socialLabel(lead.social_profile))}</a>`
             : "—"
         }</td>
         <td>${escapeHtml(lead.category || "—")}</td>
@@ -278,6 +284,35 @@ function renderRegistered(lead) {
   const isNew = Number(year) >= new Date().getFullYear() - 2;
   const badge = isNew ? ' <span class="new-badge">NEW</span>' : "";
   return `<span title="${evidence}">${label}</span>${badge}`;
+}
+
+function renderScore(lead) {
+  const score = Number(lead.lead_score);
+  if (!Number.isFinite(score) || lead.lead_score === "" || lead.lead_score == null) {
+    return '<span class="muted">—</span>';
+  }
+  const cls = score >= 60 ? "score hot" : score >= 35 ? "score warm" : "score";
+  return `<span class="${cls}">${score}</span>`;
+}
+
+function renderDomain(lead) {
+  if (lead.domain_available !== "yes" || !lead.suggested_domain) return "";
+  return `<br /><span class="domain-free" title="Domain not registered yet — a ready-made pitch">${escapeHtml(
+    lead.suggested_domain
+  )} free</span>`;
+}
+
+function socialLabel(url) {
+  const u = String(url).toLowerCase();
+  if (u.includes("facebook") || u.includes("fb.")) return "Facebook";
+  if (u.includes("instagram")) return "Instagram";
+  if (u.includes("tiktok")) return "TikTok";
+  if (u.includes("linkedin")) return "LinkedIn";
+  if (u.includes("linktr.ee")) return "Linktree";
+  if (u.includes("youtu")) return "YouTube";
+  if (u.includes("twitter") || u.includes("x.com")) return "X";
+  if (u.includes("whatsapp") || u.includes("wa.me")) return "WhatsApp";
+  return "Profile";
 }
 
 function countField(leads, field) {

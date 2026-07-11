@@ -9,8 +9,14 @@
  *   - "registration date / registered on / incorporated on" + a date
  *   - "founded / established / opened / since" + a year
  *
+ * It also checks whether <businessname>.co.za is still unregistered (one DNS
+ * query per lead — a ready-made pitch line) and computes a 0-100 lead_score
+ * from company age, social-only presence, review sweet spot, domain
+ * availability, and contactability.
+ *
  * Output: rewrites no-website-leads.csv with extra columns and sorts it
- * NEWEST COMPANIES FIRST, and merges enrichment stats into summary.json.
+ * NEWEST COMPANIES FIRST (lead_score breaks ties), and merges enrichment
+ * stats into summary.json.
  *
  * Usage:
  *   node scripts/enrich-registration-dates.mjs <leads.csv> <outDir> [location]
@@ -24,6 +30,7 @@
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import dns from "node:dns/promises";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dirname, "..");
@@ -43,6 +50,9 @@ const EXTRA_HEADERS = [
   "company_age_years",
   "date_confidence",
   "date_evidence",
+  "suggested_domain",
+  "domain_available",
+  "lead_score",
 ];
 
 const USER_AGENT =
@@ -306,6 +316,67 @@ async function findRegistrationDate(name, place) {
   return null;
 }
 
+// ---------- Domain availability (.co.za) ----------
+
+/** Turn "Joe's Plumbing (Pty) Ltd" into "joesplumbing.co.za". */
+export function suggestDomain(name) {
+  const slug = String(name ?? "")
+    .toLowerCase()
+    .replace(/\((pty|proprietary)\.?\s*(ltd|limited)?\.?\)/g, " ")
+    .replace(/\b(pty|proprietary|ltd|limited|inc|cc|t\/a|ta)\b\.?/g, " ")
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9]+/g, "");
+  if (slug.length < 3 || slug.length > 60) return "";
+  return `${slug}.co.za`;
+}
+
+/** "yes" = unregistered, "no" = taken, "" = could not tell. */
+async function checkDomainAvailable(domain) {
+  if (!domain) return "";
+  try {
+    await dns.resolveNs(domain);
+    return "no";
+  } catch (err) {
+    if (err.code === "ENOTFOUND" || err.code === "ENODATA") return "yes";
+    return "";
+  }
+}
+
+// ---------- Lead scoring ----------
+
+/**
+ * 0-100: how good a website-sales prospect this lead is.
+ * Newness dominates; social-only presence and the review sweet spot
+ * (proud owner, real traffic, still no site) do the rest.
+ */
+export function computeLeadScore(lead) {
+  let score = 0;
+
+  const year = Number(lead.registered_year) || 0;
+  if (year) {
+    const age = CURRENT_YEAR - year;
+    if (age <= 1) score += 30;
+    else if (age <= 3) score += 20;
+    else if (age <= 7) score += 10;
+    else score += 5;
+  }
+
+  if (String(lead.social_profile || "").trim()) score += 20;
+
+  const rating = Number(lead.review_rating) || 0;
+  const reviews = Number(lead.review_count) || 0;
+  if (rating >= 4 && reviews >= 10) score += 25;
+  else if (rating >= 4 && reviews >= 3) score += 15;
+  else if (reviews > 0) score += 5;
+
+  if (lead.domain_available === "yes") score += 15;
+
+  if (String(lead.phone || "").trim()) score += 5;
+  if (String(lead.whatsapp || "").trim()) score += 5;
+
+  return Math.min(score, 100);
+}
+
 // ---------- Main ----------
 
 function sortNewestFirst(leads) {
@@ -313,6 +384,9 @@ function sortNewestFirst(leads) {
     const ya = Number(a.registered_year) || 0;
     const yb = Number(b.registered_year) || 0;
     if (ya !== yb) return yb - ya; // newest year first; unknown (0) last
+    const sa = Number(a.lead_score) || 0;
+    const sb = Number(b.lead_score) || 0;
+    if (sa !== sb) return sb - sa; // then best prospects first
     // Newness proxy tie-breaker: fewer reviews usually means a newer business.
     const ra = Number(a.review_count) || 0;
     const rb = Number(b.review_count) || 0;
@@ -372,6 +446,22 @@ async function main() {
     if (i < toSearch.length - 1) await sleep(DELAY_MS);
   }
 
+  console.log(`Checking .co.za domain availability for ${leads.length} leads...`);
+  let domainsFree = 0;
+  for (const lead of leads) {
+    lead.suggested_domain = suggestDomain(lead.business_name);
+    lead.domain_available = await checkDomainAvailable(lead.suggested_domain);
+    if (lead.domain_available === "yes") {
+      domainsFree++;
+      console.log(`  ${lead.suggested_domain} is available (${lead.business_name})`);
+    }
+  }
+  console.log(`Domains still available: ${domainsFree}`);
+
+  for (const lead of leads) {
+    lead.lead_score = String(computeLeadScore(lead));
+  }
+
   const sorted = sortNewestFirst(leads);
   writeFileSync(inputPath, toCsv(outHeaders, sorted), "utf8");
 
@@ -382,7 +472,7 @@ async function main() {
   summary.registrationDates = {
     searched: toSearch.length,
     datesFound: found,
-    sortedBy: "newest companies first (unknown dates last)",
+    sortedBy: "newest companies first, lead_score breaks ties (unknown dates last)",
     newestSample: sorted
       .filter((l) => l.registered_year)
       .slice(0, 5)
@@ -393,14 +483,26 @@ async function main() {
         evidence: l.date_evidence,
       })),
   };
+  summary.domains = {
+    checked: leads.length,
+    available: domainsFree,
+  };
+  summary.leadScores = {
+    max: Math.max(0, ...sorted.map((l) => Number(l.lead_score) || 0)),
+    average:
+      Math.round(
+        (sorted.reduce((sum, l) => sum + (Number(l.lead_score) || 0), 0) /
+          (sorted.length || 1)) * 10
+      ) / 10,
+  };
   writeFileSync(summaryPath, JSON.stringify(summary, null, 2), "utf8");
 
   console.log("");
-  console.log("Registration date enrichment");
-  console.log("----------------------------");
-  console.log(`Leads searched : ${toSearch.length}`);
-  console.log(`Dates found    : ${found}`);
-  console.log(`Leads file     : ${inputPath} (sorted newest first)`);
+  console.log("Lead enrichment");
+  console.log("---------------");
+  console.log(`Dates searched   : ${toSearch.length} (found ${found})`);
+  console.log(`Domains available: ${domainsFree} of ${leads.length} checked`);
+  console.log(`Leads file       : ${inputPath} (sorted newest first)`);
 }
 
 // Only run when executed directly (extractRegistration is exported for tests).

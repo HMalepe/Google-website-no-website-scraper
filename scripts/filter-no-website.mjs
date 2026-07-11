@@ -21,6 +21,7 @@ const outDir = resolve(outArg ?? resolve(root, "output"));
 const OUT_HEADERS = [
   "business_name",
   "has_website",
+  "social_profile",
   "location",
   "address",
   "latitude",
@@ -248,7 +249,18 @@ function buildLocation(record, addressKey, latKey, lngKey) {
   return "";
 }
 
-function buildLead(record, keys) {
+function socialProfileOf(value) {
+  const v = String(value ?? "").trim();
+  if (!v) return "";
+  const host = hostOf(v);
+  if (!host) return "";
+  const isSocial = SOCIAL_ONLY_HOSTS.some(
+    (social) => host === social || host.endsWith(`.${social}`)
+  );
+  return isSocial ? normalizeUrl(v) : "";
+}
+
+function buildLead(record, keys, socialProfile) {
   const name = pick(record, NAME_KEYS);
   const phone = pick(record, PHONE_KEYS);
   const textBlob = pickAll(record, TEXT_KEYS).join(" ");
@@ -272,6 +284,7 @@ function buildLead(record, keys) {
   return {
     business_name: name,
     has_website: "no",
+    social_profile: socialProfile || "",
     location,
     address: pick(record, ["complete_address"]) || address,
     latitude: keys.lat ? record[keys.lat] ?? "" : pick(record, LAT_KEYS),
@@ -330,7 +343,7 @@ for (const record of records) {
     continue;
   }
 
-  const lead = buildLead(record, keys);
+  const lead = buildLead(record, keys, socialProfileOf(site));
   if (hasAnyContact(lead)) noWebsiteWithContact.push(lead);
   else noWebsiteNoContact.push(lead);
 }
@@ -347,6 +360,7 @@ writeFileSync(noContactPath, toCsv(OUT_HEADERS, noWebsiteNoContact), "utf8");
 const withPhone = noWebsiteWithContact.filter((l) => l.phone).length;
 const withEmail = noWebsiteWithContact.filter((l) => l.email).length;
 const withWhatsApp = noWebsiteWithContact.filter((l) => l.whatsapp).length;
+const withSocial = noWebsiteWithContact.filter((l) => l.social_profile).length;
 
 const summary = {
   source: inputPath,
@@ -360,6 +374,7 @@ const summary = {
     email: withEmail,
     whatsapp: withWhatsApp,
   },
+  socialOnly: withSocial,
   outputs: {
     leads: leadsPath,
     noContact: noContactPath,

@@ -10,6 +10,15 @@ blocks automated searches, so the lookup uses DuckDuckGo and Bing, which index
 the same public company pages. Tune it with `ENRICH_MAX`, `ENRICH_DELAY_MS`,
 and `ENRICH_TIMEOUT_MS` (see `.env.example`).
 
+Each lead also gets:
+
+- **social_profile** — the Facebook/Instagram/TikTok page a business runs
+  instead of a website (proves they care about being online)
+- **suggested_domain / domain_available** — a DNS check whether
+  `businessname.co.za` is still unregistered (a ready-made pitch line)
+- **lead_score (0–100)** — company newness + social-only presence + review
+  sweet spot (4★+, real traffic, no site) + free domain + contactability
+
 ## Go live (free or cheap VPS)
 
 **Start here:** [deploy/VPS-SETUP.md](deploy/VPS-SETUP.md)
