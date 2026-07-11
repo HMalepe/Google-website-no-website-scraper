@@ -227,7 +227,7 @@ async function loadLeads(jobId) {
   const body = $("leadsBody");
   if (leads.length === 0) {
     body.innerHTML =
-      '<tr><td colspan="6" class="empty">No no-website leads with contact info found for this city.</td></tr>';
+      '<tr><td colspan="7" class="empty">No no-website leads with contact info found for this city.</td></tr>';
     return;
   }
 
@@ -236,6 +236,7 @@ async function loadLeads(jobId) {
       (lead) => `
       <tr>
         <td><strong>${escapeHtml(lead.business_name || "—")}</strong></td>
+        <td>${renderRegistered(lead)}</td>
         <td>${escapeHtml(lead.location || lead.address || "—")}</td>
         <td>${escapeHtml(lead.phone || "—")}</td>
         <td>${escapeHtml(lead.email || "—")}</td>
@@ -265,6 +266,18 @@ async function loadLeads(jobId) {
       a.click();
     }
   };
+}
+
+function renderRegistered(lead) {
+  const date = String(lead.registered_date || "").trim();
+  const year = String(lead.registered_year || "").trim();
+  if (!date && !year) return '<span class="muted">unknown</span>';
+
+  const label = escapeHtml(date || year);
+  const evidence = escapeHtml(lead.date_evidence || "");
+  const isNew = Number(year) >= new Date().getFullYear() - 2;
+  const badge = isNew ? ' <span class="new-badge">NEW</span>' : "";
+  return `<span title="${evidence}">${label}</span>${badge}`;
 }
 
 function countField(leads, field) {

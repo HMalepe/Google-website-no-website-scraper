@@ -2,6 +2,14 @@
 
 **webscrape.selantra.co.za** — find businesses with no website in any city.
 
+After the no-website filter, each lead gets a **separate web search** for its
+company registration / opening date (CIPC-style registration numbers,
+"registered on…", "founded/established/opened in…"). Results are sorted
+**newest companies first**; leads without a findable date come last. Google
+blocks automated searches, so the lookup uses DuckDuckGo and Bing, which index
+the same public company pages. Tune it with `ENRICH_MAX`, `ENRICH_DELAY_MS`,
+and `ENRICH_TIMEOUT_MS` (see `.env.example`).
+
 ## Go live (free or cheap VPS)
 
 **Start here:** [deploy/VPS-SETUP.md](deploy/VPS-SETUP.md)

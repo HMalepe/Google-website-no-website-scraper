@@ -285,6 +285,32 @@ async function runScrapeJob(job) {
       jobDir,
     ]);
 
+    job.status = "dating";
+    saveJob(job);
+    appendLog(job, "Searching registration/opening dates (newest companies first)...");
+
+    try {
+      await runCommand(
+        "node",
+        [
+          join(ROOT, "scripts", "enrich-registration-dates.mjs"),
+          leadsPath,
+          jobDir,
+          job.location,
+        ],
+        {
+          onStdout: (text) => {
+            for (const line of text.split(/\r?\n/)) {
+              if (line.trim()) appendLog(job, line.trim());
+            }
+          },
+        }
+      );
+    } catch (err) {
+      // Dates are a bonus — never fail the job over them.
+      appendLog(job, `Date search skipped: ${err.message}`);
+    }
+
     const summaryPath = join(jobDir, "summary.json");
     job.summary = existsSync(summaryPath)
       ? JSON.parse(readFileSync(summaryPath, "utf8"))
@@ -292,7 +318,7 @@ async function runScrapeJob(job) {
     job.leadCount = csvToObjects(leadsPath).length;
     job.status = "completed";
     job.finishedAt = new Date().toISOString();
-    appendLog(job, `Done. ${job.leadCount} no-website leads with contact info.`);
+    appendLog(job, `Done. ${job.leadCount} no-website leads, newest companies first.`);
   } catch (err) {
     job.status = "failed";
     job.error = err.message;
