@@ -11,6 +11,13 @@ const DEFAULT_CATEGORIES = [
   "lawyers",
 ];
 
+const LEAD_LABELS = {
+  NO_WEBSITE: "No website",
+  SOCIAL_ONLY: "Social only",
+  FREE_SUBDOMAIN: "Free subdomain",
+  OUTDATED_SITE: "Weak website",
+};
+
 const $ = (id) => document.getElementById(id);
 const selected = new Set();
 
@@ -58,6 +65,7 @@ function renderChips() {
       if (selected.has(cat)) selected.delete(cat);
       else selected.add(cat);
       renderChips();
+      updateQueryCount();
     });
     wrap.appendChild(btn);
   }
@@ -72,6 +80,29 @@ function getCustomCategories() {
 
 function getAllCategories() {
   return [...selected, ...getCustomCategories()];
+}
+
+function getSuburbs() {
+  return [
+    ...new Set(
+      $("suburbs")
+        .value.split(/[,\r\n]+/)
+        .map((s) => s.trim())
+        .filter(Boolean)
+    ),
+  ];
+}
+
+function updateQueryCount() {
+  const types = new Set(getAllCategories()).size || DEFAULT_CATEGORIES.length;
+  const areas = getSuburbs().length || 1;
+  const total = types * areas;
+  let text = `${total} search${total === 1 ? "" : "es"} (${types} business types × ${areas} area${
+    areas === 1 ? "" : "s"
+  }).`;
+  if (total > 400) text += " Too many — max is 400.";
+  else if (total > 60) text += " Big sweep: this can take a while.";
+  $("queryCount").textContent = text;
 }
 
 async function init() {
@@ -142,7 +173,16 @@ function escapeHtml(value) {
   return String(value)
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;");
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+/** Only http(s) links from scraped data may become clickable. */
+function safeUrl(value) {
+  const url = String(value || "").trim();
+  if (/^https?:\/\//i.test(url)) return url;
+  if (/^[a-z0-9.-]+\.[a-z]{2,}(\/|$)/i.test(url)) return `https://${url}`;
+  return "";
 }
 
 async function startScrape() {
@@ -164,7 +204,13 @@ async function startScrape() {
 
   const { res, data } = await api("/api/scrape", {
     method: "POST",
-    body: JSON.stringify({ location, categories }),
+    body: JSON.stringify({
+      location,
+      categories,
+      suburbs: getSuburbs(),
+      depth: Number($("depth").value),
+      auditSites: $("auditSites").checked,
+    }),
   });
 
   if (!res.ok) {
@@ -218,16 +264,20 @@ async function loadLeads(jobId) {
   $("resultsPanel").hidden = false;
   $("stats").hidden = false;
 
-  $("statLeads").textContent = summary?.noWebsiteWithContact ?? leads.length;
+  const statusOf = (lead) => lead.status || "NO_WEBSITE";
+  const countStatus = (...statuses) =>
+    leads.filter((lead) => statuses.includes(statusOf(lead))).length;
+
+  $("statLeads").textContent = leads.length;
+  $("statNoSite").textContent = countStatus("NO_WEBSITE", "SOCIAL_ONLY");
+  $("statWeakSite").textContent = countStatus("FREE_SUBDOMAIN", "OUTDATED_SITE");
   $("statPhone").textContent = summary?.contactBreakdown?.phone ?? countField(leads, "phone");
   $("statEmail").textContent = summary?.contactBreakdown?.email ?? countField(leads, "email");
-  $("statWhatsapp").textContent =
-    summary?.contactBreakdown?.whatsapp ?? countField(leads, "whatsapp");
 
   const body = $("leadsBody");
   if (leads.length === 0) {
     body.innerHTML =
-      '<tr><td colspan="6" class="empty">No no-website leads with contact info found for this city.</td></tr>';
+      '<tr><td colspan="7" class="empty">No leads with contact info found for this city.</td></tr>';
     return;
   }
 
@@ -235,13 +285,31 @@ async function loadLeads(jobId) {
     .map(
       (lead) => `
       <tr>
-        <td><strong>${escapeHtml(lead.business_name || "—")}</strong></td>
+        <td>
+          <span class="lead-badge ${escapeHtml(statusOf(lead).toLowerCase())}">${escapeHtml(
+            LEAD_LABELS[statusOf(lead)] || statusOf(lead)
+          )}${lead.score ? ` · ${escapeHtml(lead.score)}` : ""}</span>
+          ${lead.reasons ? `<span class="lead-reasons">${escapeHtml(lead.reasons)}</span>` : ""}
+        </td>
+        <td><strong>${
+          safeUrl(lead.google_maps_link)
+            ? `<a href="${escapeHtml(safeUrl(lead.google_maps_link))}" target="_blank" rel="noopener">${escapeHtml(
+                lead.business_name || "—"
+              )}</a>`
+            : escapeHtml(lead.business_name || "—")
+        }</strong>${
+          safeUrl(lead.website)
+            ? `<span class="lead-reasons"><a href="${escapeHtml(safeUrl(lead.website))}" target="_blank" rel="noopener">${escapeHtml(
+                lead.website
+              )}</a></span>`
+            : ""
+        }</td>
         <td>${escapeHtml(lead.location || lead.address || "—")}</td>
         <td>${escapeHtml(lead.phone || "—")}</td>
         <td>${escapeHtml(lead.email || "—")}</td>
         <td>${
-          lead.whatsapp
-            ? `<a href="${escapeHtml(lead.whatsapp)}" target="_blank" rel="noopener">Open</a>`
+          safeUrl(lead.whatsapp)
+            ? `<a href="${escapeHtml(safeUrl(lead.whatsapp))}" target="_blank" rel="noopener">Open</a>`
             : "—"
         }</td>
         <td>${escapeHtml(lead.category || "—")}</td>
@@ -299,6 +367,9 @@ $("city").addEventListener("keydown", (e) => {
 });
 
 renderChips();
+updateQueryCount();
+$("customCategories").addEventListener("input", updateQueryCount);
+$("suburbs").addEventListener("input", updateQueryCount);
 $("startBtn").addEventListener("click", startScrape);
 init();
 setInterval(refreshHealth, 15000);
