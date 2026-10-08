@@ -7,9 +7,11 @@ services:
     environment:
       PORT: 3847
       NODE_ENV: production
+      DATA_DIR: /srv/webscrape-data
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - webscrape_data:/app/data
+      # Same path on host and container: the scraper runs on the host daemon.
+      - /srv/webscrape-data:/srv/webscrape-data
     expose:
       - "3847"
 
@@ -27,6 +29,5 @@ services:
       - webscrape
 
 volumes:
-  webscrape_data:
   caddy_data:
   caddy_config:
