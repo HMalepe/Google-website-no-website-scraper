@@ -114,10 +114,16 @@
 
       <section class="panel progress-panel" id="progressPanel" hidden>
         <div class="progress-head">
-          <h2>Scanning <span id="scanCity"></span></h2>
+          <h2><span id="scanVerb">Scanning</span> <span id="scanCity"></span></h2>
           <span class="badge" id="jobStatus">queued</span>
         </div>
-        <div class="log" id="log"></div>
+        <ol class="steps" id="steps"></ol>
+        <div class="bar" id="bar"><div class="bar-fill" id="barFill"></div></div>
+        <div class="progress-stats" id="progressStats"></div>
+        <details class="log-details" open>
+          <summary>Live log</summary>
+          <div class="log" id="log"></div>
+        </details>
       </section>
 
       <section class="panel results-panel" id="resultsPanel" hidden>
