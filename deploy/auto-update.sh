@@ -10,6 +10,20 @@ APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 DATA_DIR="${DATA_DIR:-/srv/webscrape-data}"
 LOG="$HOME/webscrape-auto-update.log"
 
+# Swap gives the VM a cushion so a memory spike slows it down instead of
+# freezing it. Idempotent; sudo -n never waits for a password under cron.
+ensure_swap() {
+  swapon --show --noheadings 2>/dev/null | grep -q . && return 0
+  if [ ! -f /swapfile ]; then
+    sudo -n fallocate -l 4G /swapfile && sudo -n chmod 600 /swapfile \
+      && sudo -n mkswap /swapfile >/dev/null || return 0
+  fi
+  sudo -n swapon /swapfile || return 0
+  grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' | sudo -n tee -a /etc/fstab >/dev/null
+  echo "$(date -Is) swap enabled (4G)"
+}
+ensure_swap
+
 if [ "${1:-}" = "--install" ]; then
   LINE="*/5 * * * * bash $APP_DIR/deploy/auto-update.sh >> $LOG 2>&1"
   ( crontab -l 2>/dev/null | grep -v "deploy/auto-update.sh"; echo "$LINE" ) | crontab -
