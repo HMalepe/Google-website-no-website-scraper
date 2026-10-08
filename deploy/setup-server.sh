@@ -48,6 +48,9 @@ docker info >/dev/null 2>&1 || DOCKER="sudo docker"
 $DOCKER compose pull 2>/dev/null || true
 $DOCKER compose up -d --build
 
+echo "==> Auto-update from GitHub every 5 minutes..."
+bash "$APP_DIR/deploy/auto-update.sh" --install
+
 echo ""
 echo "Done. Check status:"
 $DOCKER compose ps
