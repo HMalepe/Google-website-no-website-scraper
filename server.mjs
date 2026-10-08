@@ -50,8 +50,15 @@ const SCRAPER_IDLE_LIMIT_MS = 20 * 60_000;
 // The scraper's headless browsers can eat all RAM and freeze the whole VM
 // (dashboard and SSH included). Cap it so only the scraper gets killed, and
 // size parallel browser tabs to the CPUs available.
-const SCRAPER_MEMORY_MB = Math.max(1024, Math.floor((totalmem() / 1048576) * 0.6));
-const DEFAULT_CONCURRENCY = Math.max(1, Math.min(4, cpus().length));
+// Each browser tab needs roughly 1.5 GB to be comfortable, so a 1 GB VM
+// (Oracle's E2.1.Micro) gets a single tab instead of one per CPU.
+const TOTAL_MEMORY_MB = Math.floor(totalmem() / 1048576);
+const SCRAPER_MEMORY_MB = Math.max(384, Math.floor(TOTAL_MEMORY_MB * 0.6));
+const DEFAULT_CONCURRENCY = Math.max(
+  1,
+  Math.min(4, cpus().length, Math.floor(TOTAL_MEMORY_MB / 1536))
+);
+const SMALL_SERVER = TOTAL_MEMORY_MB < 3000;
 const OOM_EXIT_CODE = 137;
 const DEFAULT_DEPTH = 10;
 const MAX_DEPTH = 30;
@@ -549,6 +556,8 @@ const server = createServer(async (req, res) => {
         siteName: SITE_NAME,
         publicUrl: PUBLIC_URL || null,
         authRequired: Boolean(ACCESS_PASSWORD),
+        memoryMb: TOTAL_MEMORY_MB,
+        smallServer: SMALL_SERVER,
         authenticated: authed,
         activeJob: activeJob?.id ?? null,
       });
@@ -656,7 +665,11 @@ const server = createServer(async (req, res) => {
         categories,
         suburbs,
         queries,
-        depth: clampInt(body.depth, 1, MAX_DEPTH, DEFAULT_DEPTH),
+        // Deep scrolling multiplies browser memory; keep tiny servers shallow.
+        depth: Math.min(
+          clampInt(body.depth, 1, MAX_DEPTH, DEFAULT_DEPTH),
+          SMALL_SERVER ? 3 : MAX_DEPTH
+        ),
         concurrency: clampInt(body.concurrency, 1, 16, DEFAULT_CONCURRENCY),
         auditSites: Boolean(body.auditSites),
         status: "queued",

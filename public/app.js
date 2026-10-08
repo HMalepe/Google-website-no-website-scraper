@@ -222,7 +222,10 @@ async function refreshRecent() {
 function updateEngineStatus(data) {
   const pill = $("engineStatus");
   if (data.docker) {
-    pill.textContent = "Online";
+    pill.textContent = data.smallServer ? "Online · small server" : "Online";
+    pill.title = data.smallServer
+      ? `This server has ${data.memoryMb} MB RAM: scans run one browser at a time and stay shallow (slower, fewer results).`
+      : "";
     pill.className = "status-pill ok";
     $("startBtn").disabled = false;
   } else {
