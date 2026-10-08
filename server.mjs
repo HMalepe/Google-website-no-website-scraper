@@ -152,10 +152,104 @@ function saveJob(job) {
   writeFileSync(join(dir, "job.json"), JSON.stringify(job, null, 2), "utf8");
 }
 
+const saveTimers = new Map();
+
+/** Coalesce frequent progress updates into at most one disk write per second. */
+function scheduleSave(job) {
+  if (saveTimers.has(job.id)) return;
+  saveTimers.set(
+    job.id,
+    setTimeout(() => {
+      saveTimers.delete(job.id);
+      saveJob(job);
+    }, 1000)
+  );
+}
+
 function appendLog(job, line) {
   job.log.push({ at: new Date().toISOString(), line });
   if (job.log.length > 500) job.log = job.log.slice(-500);
-  saveJob(job);
+  scheduleSave(job);
+}
+
+/** Feed chunked process output to onLine one complete line at a time. */
+function lineSplitter(onLine) {
+  let pending = "";
+  return (text) => {
+    pending += text;
+    const lines = pending.split(/\r?\n/);
+    pending = lines.pop();
+    for (const line of lines) if (line.trim()) onLine(line.trim());
+  };
+}
+
+function searchLabel(jobDescription) {
+  const m = jobDescription.match(/\/maps\/search\/([^,}\s]+)/);
+  if (!m) return "";
+  try {
+    return decodeURIComponent(m[1].replace(/\+/g, " "));
+  } catch {
+    return m[1].replace(/\+/g, " ");
+  }
+}
+
+/**
+ * Turn gosom's JSON log lines into progress counters and readable log lines.
+ * Each search and each business page logs "job finished" when done.
+ */
+function handleScraperLine(job, line) {
+  if (/^[║╔╚═]/.test(line) || line.startsWith("posthog")) return; // banner, telemetry noise
+
+  let ev = null;
+  if (line.startsWith("{")) {
+    try {
+      ev = JSON.parse(line);
+    } catch {
+      ev = null;
+    }
+  }
+  if (!ev) {
+    appendLog(job, line);
+    return;
+  }
+
+  const p = job.progress;
+  if (ev.message === "job finished" && typeof ev.job === "string") {
+    if (ev.job.includes("/maps/search/")) {
+      p.searchesDone++;
+      const label = searchLabel(ev.job);
+      const verb = ev.status === "failed" ? "failed" : "done";
+      appendLog(job, `Search ${p.searchesDone}/${p.searchesTotal} ${verb}: ${label}`);
+    } else if (ev.job.includes("/maps/place/") && ev.status !== "failed") {
+      p.placesDone++;
+      p.businessesFound = Math.max(p.businessesFound, p.placesDone);
+      if (p.placesDone % 25 === 0) appendLog(job, `${p.placesDone} businesses scraped so far`);
+      scheduleSave(job);
+    }
+    return;
+  }
+  if (ev.message === "starting scrapemate") {
+    appendLog(job, "Scraper engine started, opening Google Maps...");
+  } else if (ev.message === "exiting because of inactivity") {
+    appendLog(job, "Scraper idle, wrapping up...");
+  } else if (ev.level === "error" && ev.message !== "error while processing job") {
+    appendLog(job, `Scraper error: ${ev.error || ev.message}`);
+  }
+}
+
+function handleFilterLine(job, line) {
+  const p = job.progress;
+  const checking = line.match(/^\[audit\] checking (\d+) websites/);
+  const checked = line.match(/^\[audit\] (\d+)\/(\d+) websites checked/);
+  if (checking) {
+    p.phase = "auditing";
+    p.auditTotal = Number(checking[1]);
+    appendLog(job, `Checking ${p.auditTotal} websites for outdated or broken sites...`);
+  } else if (checked) {
+    p.auditDone = Number(checked[1]);
+    p.auditTotal = Number(checked[2]);
+    appendLog(job, `Websites checked: ${p.auditDone}/${p.auditTotal}`);
+  }
 }
 
 function cleanList(values) {
@@ -255,6 +349,15 @@ async function runScrapeJob(job) {
 
   job.status = "scraping";
   job.startedAt = new Date().toISOString();
+  job.progress = {
+    phase: "scraping",
+    searchesTotal: job.queries.length,
+    searchesDone: 0,
+    placesDone: 0,
+    businessesFound: 0,
+    auditDone: 0,
+    auditTotal: 0,
+  };
   saveJob(job);
   appendLog(
     job,
@@ -286,19 +389,26 @@ async function runScrapeJob(job) {
   // Email crawling visits each listing's website: only worth it when sites become leads.
   if (job.auditSites) dockerArgs.push("-email");
 
+  // Businesses written so far: covers scraper versions whose logs we can't count.
+  const rowCounter = setInterval(() => {
+    if (!existsSync(resultsPath)) return;
+    const rows = csvToObjects(resultsPath).length;
+    if (rows > job.progress.businessesFound) {
+      job.progress.businessesFound = rows;
+      scheduleSave(job);
+    }
+  }, 5000);
+
   try {
-    await runCommand("docker", dockerArgs, {
-      onStdout: (text) => {
-        for (const line of text.split(/\r?\n/)) {
-          if (line.trim()) appendLog(job, line.trim());
-        }
-      },
-      onStderr: (text) => {
-        for (const line of text.split(/\r?\n/)) {
-          if (line.trim()) appendLog(job, `[docker] ${line.trim()}`);
-        }
-      },
-    });
+    const onScraperLine = (line) => handleScraperLine(job, line);
+    try {
+      await runCommand("docker", dockerArgs, {
+        onStdout: lineSplitter(onScraperLine),
+        onStderr: lineSplitter(onScraperLine),
+      });
+    } finally {
+      clearInterval(rowCounter);
+    }
 
     if (!existsSync(resultsPath)) {
       throw new Error("Scrape finished but results.csv was not created.");
@@ -309,6 +419,8 @@ async function runScrapeJob(job) {
       );
     }
 
+    job.progress.businessesFound = csvToObjects(resultsPath).length;
+    job.progress.phase = "filtering";
     job.status = "filtering";
     saveJob(job);
     appendLog(
@@ -321,11 +433,7 @@ async function runScrapeJob(job) {
     const filterArgs = [join(ROOT, "scripts", "filter-no-website.mjs"), resultsPath, jobDir];
     if (job.auditSites) filterArgs.push("--audit");
     await runCommand("node", filterArgs, {
-      onStdout: (text) => {
-        for (const line of text.split(/\r?\n/)) {
-          if (line.startsWith("[audit]")) appendLog(job, line);
-        }
-      },
+      onStdout: lineSplitter((line) => handleFilterLine(job, line)),
     });
 
     const summaryPath = join(jobDir, "summary.json");
@@ -334,6 +442,7 @@ async function runScrapeJob(job) {
       : null;
     job.leadCount = csvToObjects(leadsFile(job.id)).length;
     job.status = "completed";
+    job.progress.phase = "completed";
     job.finishedAt = new Date().toISOString();
     appendLog(job, `Done. ${job.leadCount} leads with contact info.`);
   } catch (err) {
@@ -343,6 +452,8 @@ async function runScrapeJob(job) {
     appendLog(job, `ERROR: ${err.message}`);
   } finally {
     activeJob = null;
+    clearTimeout(saveTimers.get(job.id));
+    saveTimers.delete(job.id);
     saveJob(job);
   }
 }
@@ -415,7 +526,8 @@ const server = createServer(async (req, res) => {
     if (req.method === "GET" && url.pathname.startsWith("/api/jobs/")) {
       if (!requireAuth(req, res)) return;
       const id = url.pathname.split("/")[3];
-      const job = loadJob(id);
+      // The running job lives in memory; disk writes are throttled.
+      const job = activeJob?.id === id ? activeJob : loadJob(id);
       if (!job) return json(res, 404, { error: "Job not found" });
       return json(res, 200, { job });
     }

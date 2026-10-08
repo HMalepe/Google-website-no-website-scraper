@@ -42,12 +42,15 @@ if command -v ufw >/dev/null 2>&1; then
 fi
 
 echo "==> Starting containers..."
-docker compose pull 2>/dev/null || true
-docker compose up -d --build
+# A fresh docker group membership only applies after re-login; use sudo until then.
+DOCKER="docker"
+docker info >/dev/null 2>&1 || DOCKER="sudo docker"
+$DOCKER compose pull 2>/dev/null || true
+$DOCKER compose up -d --build
 
 echo ""
 echo "Done. Check status:"
-docker compose ps
+$DOCKER compose ps
 echo ""
 echo "Point DNS: webscrape.selantra.co.za -> $(curl -4 -s ifconfig.me || echo 'YOUR_SERVER_IP')"
 echo "Then open: https://webscrape.selantra.co.za"

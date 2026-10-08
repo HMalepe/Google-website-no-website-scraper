@@ -160,6 +160,91 @@ function setJobStatus(status) {
   badge.className = `badge ${status}`;
 }
 
+function formatDuration(ms) {
+  const total = Math.max(0, Math.round(ms / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = String(total % 60).padStart(2, "0");
+  return h ? `${h}h ${m}m` : `${m}:${s}`;
+}
+
+/** Scraping fills most of the bar; filtering / website checks the rest. */
+function progressPercent(job, p) {
+  const scrapeShare = job.auditSites ? 80 : 95;
+  if (job.status === "completed") return 100;
+  if (job.status === "filtering") {
+    if (p.phase === "auditing" && p.auditTotal) {
+      return scrapeShare + ((99 - scrapeShare) * p.auditDone) / p.auditTotal;
+    }
+    return scrapeShare + 1;
+  }
+  if (p.searchesTotal) return (scrapeShare * p.searchesDone) / p.searchesTotal;
+  return 0;
+}
+
+function renderProgress(job) {
+  const p = job.progress || {};
+  const running = !["completed", "failed"].includes(job.status);
+  $("scanVerb").textContent =
+    job.status === "completed" ? "Scanned" : job.status === "failed" ? "Scan failed:" : "Scanning";
+
+  const steps = [
+    ["scraping", "Searching Google Maps"],
+    ["filtering", "Filtering leads"],
+  ];
+  if (job.auditSites) steps.push(["auditing", "Checking websites"]);
+  steps.push(["completed", "Done"]);
+
+  const current =
+    job.status === "completed"
+      ? "completed"
+      : job.status === "failed"
+        ? p.phase || "scraping"
+        : p.phase === "auditing"
+          ? "auditing"
+          : job.status;
+  const currentIndex = steps.findIndex(([key]) => key === current);
+
+  $("steps").innerHTML = steps
+    .map(([key, label], i) => {
+      let cls = "";
+      if (job.status === "completed" || i < currentIndex) cls = "done";
+      else if (i === currentIndex) cls = job.status === "failed" ? "failed" : "active";
+      return `<li class="${cls}">${escapeHtml(label)}</li>`;
+    })
+    .join("");
+
+  $("bar").className = `bar${running ? " running" : ""}${job.status === "failed" ? " failed" : ""}`;
+  $("barFill").style.width = `${Math.min(100, progressPercent(job, p))}%`;
+
+  const stats = [];
+  if (p.searchesTotal) {
+    stats.push(`Searches <strong>${p.searchesDone}/${p.searchesTotal}</strong>`);
+  }
+  if (p.businessesFound) stats.push(`<strong>${p.businessesFound}</strong> businesses found`);
+  if (p.auditTotal) stats.push(`Websites checked <strong>${p.auditDone}/${p.auditTotal}</strong>`);
+
+  const start = job.startedAt ? Date.parse(job.startedAt) : null;
+  const end = job.finishedAt ? Date.parse(job.finishedAt) : Date.now();
+  if (start) stats.push(`${running ? "Elapsed" : "Took"} <strong>${formatDuration(end - start)}</strong>`);
+
+  if (job.status === "scraping" && start && p.searchesTotal) {
+    if (p.searchesDone > 0 && p.searchesDone < p.searchesTotal) {
+      const perSearch = (Date.now() - start) / p.searchesDone;
+      const left = perSearch * (p.searchesTotal - p.searchesDone);
+      stats.push(`≈ <strong>${Math.max(1, Math.round(left / 60000))} min</strong> left`);
+    } else if (p.searchesDone >= p.searchesTotal) {
+      stats.push("Finishing business details…");
+    } else {
+      stats.push("Opening Google Maps…");
+    }
+  }
+  if (job.status === "completed") stats.push(`<strong>${job.leadCount ?? 0}</strong> leads`);
+  if (job.status === "failed" && job.error) stats.push(escapeHtml(job.error));
+
+  $("progressStats").innerHTML = stats.map((s) => `<span>${s}</span>`).join("");
+}
+
 function renderLog(lines) {
   const log = $("log");
   log.innerHTML = lines
@@ -200,6 +285,7 @@ async function startScrape() {
   $("stats").hidden = true;
   $("scanCity").textContent = location;
   setJobStatus("starting");
+  renderProgress({ status: "queued", auditSites: $("auditSites").checked, progress: {} });
   $("log").innerHTML = "";
 
   const { res, data } = await api("/api/scrape", {
@@ -238,7 +324,9 @@ async function pollJob() {
 
   const job = data.job;
   $("progressPanel").hidden = false;
+  $("scanCity").textContent = job.location || "";
   setJobStatus(job.status);
+  renderProgress(job);
   renderLog(job.log || []);
 
   if (job.status === "completed") {
