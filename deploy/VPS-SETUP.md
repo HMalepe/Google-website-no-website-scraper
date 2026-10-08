@@ -167,8 +167,11 @@ docker compose ps
 # Logs
 docker compose logs -f webscrape
 
-# Update app
-git pull && docker compose up -d --build
+# Update app (automatic: the server checks GitHub every 5 minutes and
+# rebuilds when main changes, waiting until no scan is running)
+tail ~/webscrape-auto-update.log           # see what auto-update did
+bash deploy/auto-update.sh --install       # (re)install it if missing
+git pull && sudo docker compose up -d --build   # manual update
 
 # Restart
 docker compose restart
