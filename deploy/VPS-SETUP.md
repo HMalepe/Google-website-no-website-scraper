@@ -183,4 +183,6 @@ docker compose restart
 | Oracle "out of capacity" | Retry later or use Hetzner |
 | Site not loading | Check DNS + Oracle security list ports 80/443 |
 | "Engine offline" | `docker compose restart webscrape` |
+| Every scan fails with `read /queries.txt: is a directory` | Old setup — run `git pull && docker compose up -d --build` |
+| "Google Maps returned no businesses" | Check spelling; if it repeats for every city, Google is blocking the server IP — wait a few hours |
 | Forgot password | `nano .env` → change `ACCESS_PASSWORD` → `docker compose up -d` |

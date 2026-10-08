@@ -15,7 +15,10 @@ import { randomUUID } from "node:crypto";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = __dirname;
 const PUBLIC = join(ROOT, "public");
-const DATA = join(ROOT, "data");
+// In Docker, DATA_DIR must be the same absolute path on the host and in this
+// container: scrape jobs are started on the host's Docker daemon, which
+// resolves the -v mount paths below on the host, not in this container.
+const DATA = process.env.DATA_DIR || join(ROOT, "data");
 const JOBS = join(DATA, "jobs");
 const PORT = Number(process.env.PORT || 3847);
 const ACCESS_PASSWORD = process.env.ACCESS_PASSWORD || "";
@@ -299,6 +302,11 @@ async function runScrapeJob(job) {
 
     if (!existsSync(resultsPath)) {
       throw new Error("Scrape finished but results.csv was not created.");
+    }
+    if (csvToObjects(resultsPath).length === 0) {
+      throw new Error(
+        "Google Maps returned no businesses. Check the city spelling, or the server's IP may be blocked by Google (try again later)."
+      );
     }
 
     job.status = "filtering";
