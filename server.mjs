@@ -543,7 +543,20 @@ const server = createServer(async (req, res) => {
 
     if (req.method === "GET" && url.pathname === "/api/jobs") {
       if (!requireAuth(req, res)) return;
-      return json(res, 200, { jobs: listJobs().slice(0, 20) });
+      // Summaries only: the full logs are fetched per job.
+      const jobs = listJobs()
+        .slice(0, 20)
+        .map(({ id, location, suburbs, status, createdAt, finishedAt, leadCount, auditSites }) => ({
+          id,
+          location,
+          suburbs,
+          status,
+          createdAt,
+          finishedAt,
+          leadCount,
+          auditSites,
+        }));
+      return json(res, 200, { jobs });
     }
 
     if (req.method === "GET" && url.pathname.startsWith("/api/jobs/")) {

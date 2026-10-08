@@ -32,6 +32,56 @@ body {
   min-height: 100vh;
 }
 
+.conn-banner {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  padding: 10px 16px;
+  text-align: center;
+  font-size: 14px;
+  background: #5c2330;
+  color: #ffd6de;
+}
+
+.recent-panel h2 {
+  font-size: 1.1rem;
+  margin-bottom: 12px;
+}
+
+.recent-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.recent-item {
+  width: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.recent-item:hover {
+  border-color: rgba(109, 94, 252, 0.55);
+}
+
+.recent-meta {
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .login-screen {
   min-height: 100vh;
   display: grid;
@@ -491,6 +541,78 @@ td a {
   display: grid;
   gap: 12px;
   margin-top: 18px;
+}
+
+@media (max-width: 700px) {
+  .app {
+    padding: 20px 16px 48px;
+  }
+
+  .hero-panel {
+    padding: 20px;
+  }
+
+  /* Results as cards: one lead per card, label beside each value. */
+  .table-wrap {
+    border: none;
+    overflow: visible;
+  }
+
+  table {
+    min-width: 0;
+  }
+
+  thead {
+    display: none;
+  }
+
+  tbody,
+  tr,
+  td {
+    display: block;
+  }
+
+  tr {
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: var(--panel-2);
+    margin-bottom: 12px;
+    padding: 6px 4px;
+  }
+
+  td {
+    display: grid;
+    grid-template-columns: 92px 1fr;
+    gap: 10px;
+    padding: 8px 12px;
+    border-bottom: none;
+    overflow-wrap: anywhere;
+  }
+
+  td::before {
+    content: attr(data-label);
+    color: var(--muted);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding-top: 2px;
+  }
+
+  td.empty {
+    display: block;
+  }
+
+  td.empty::before {
+    content: none;
+  }
+
+  .lead-reasons {
+    max-width: none;
+  }
+
+  .results-head {
+    flex-wrap: wrap;
+  }
 }
 
 @media (max-width: 800px) {

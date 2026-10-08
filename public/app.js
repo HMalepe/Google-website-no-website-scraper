@@ -23,7 +23,31 @@ const selected = new Set();
 
 let currentJobId = null;
 let pollTimer = null;
-let authToken = sessionStorage.getItem("webscrape_token") || "";
+let polling = false;
+let leadsShownFor = null;
+
+// Login survives the phone killing/reloading the tab. Storage can throw
+// (private mode, blocked site data), so every access is guarded.
+const TOKEN_KEY = "webscrape_token";
+function readToken() {
+  try {
+    return localStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(TOKEN_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+function writeToken(value) {
+  try {
+    if (value) localStorage.setItem(TOKEN_KEY, value);
+    else {
+      localStorage.removeItem(TOKEN_KEY);
+      sessionStorage.removeItem(TOKEN_KEY);
+    }
+  } catch {
+    /* storage unavailable: stay logged in for this page only */
+  }
+}
+let authToken = readToken();
 
 function authHeaders() {
   if (!authToken) return { "Content-Type": "application/json" };
@@ -33,13 +57,34 @@ function authHeaders() {
   };
 }
 
+/** Never throws: a network failure comes back as { offline: true }. */
 async function api(path, options = {}) {
-  const res = await fetch(path, {
-    ...options,
-    headers: { ...authHeaders(), ...(options.headers || {}) },
-  });
-  const data = await res.json().catch(() => ({}));
-  return { res, data };
+  try {
+    const res = await fetch(path, {
+      ...options,
+      cache: "no-store",
+      headers: { ...authHeaders(), ...(options.headers || {}) },
+    });
+    const data = await res.json().catch(() => ({}));
+    setOffline(false);
+    return { res, data, offline: false };
+  } catch {
+    setOffline(true);
+    return { res: { ok: false, status: 0 }, data: {}, offline: true };
+  }
+}
+
+let reconnectTimer = null;
+
+function setOffline(offline) {
+  $("connBanner").hidden = !offline;
+  if (offline && !reconnectTimer) {
+    // Probe every 3s while offline; any successful request clears the banner.
+    reconnectTimer = setInterval(catchUp, 3000);
+  } else if (!offline && reconnectTimer) {
+    clearInterval(reconnectTimer);
+    reconnectTimer = null;
+  }
 }
 
 function showLogin() {
@@ -105,11 +150,16 @@ function updateQueryCount() {
   $("queryCount").textContent = text;
 }
 
-async function init() {
-  const { res, data } = await api("/api/health");
+let initRetry = null;
 
-  if (!res.ok) {
-    showLogin();
+async function init() {
+  clearTimeout(initRetry);
+  const { res, data, offline } = await api("/api/health");
+
+  if (offline || res.status >= 500) {
+    // Server unreachable or restarting (e.g. updating): keep retrying.
+    setOffline(true);
+    initRetry = setTimeout(init, 5000);
     return;
   }
 
@@ -118,22 +168,55 @@ async function init() {
     return;
   }
 
-  if (data.authRequired && authToken) {
-    const check = await api("/api/jobs");
-    if (check.res.status === 401) {
-      sessionStorage.removeItem("webscrape_token");
-      authToken = "";
-      showLogin();
-      return;
-    }
+  const check = await api("/api/jobs");
+  if (check.res.status === 401) {
+    writeToken("");
+    authToken = "";
+    showLogin();
+    return;
   }
+  const jobs = check.data.jobs || [];
 
   showApp();
   updateEngineStatus(data);
-  if (data.activeJob) {
-    currentJobId = data.activeJob;
-    startPolling();
-  }
+  renderRecent(jobs);
+
+  // Reopen the running scan, or the latest one, so a reload never loses results.
+  const resumeId = data.activeJob || currentJobId || jobs[0]?.id;
+  if (resumeId) openJob(resumeId);
+}
+
+function openJob(id) {
+  currentJobId = id;
+  leadsShownFor = null;
+  $("resultsPanel").hidden = true;
+  $("stats").hidden = true;
+  startPolling();
+}
+
+function renderRecent(jobs) {
+  const list = $("recentList");
+  $("recentPanel").hidden = jobs.length === 0;
+  list.innerHTML = jobs
+    .slice(0, 10)
+    .map((job) => {
+      const when = job.createdAt ? new Date(job.createdAt).toLocaleString() : "";
+      const areas = job.suburbs?.length ? ` · ${job.suburbs.length} suburbs` : "";
+      const result =
+        job.status === "completed" ? `${job.leadCount ?? 0} leads` : job.status || "";
+      return `<li><button type="button" class="recent-item" data-job="${escapeHtml(job.id)}">
+        <span><strong>${escapeHtml(job.location || "—")}</strong>${escapeHtml(areas)}</span>
+        <span class="recent-meta">${escapeHtml(when)} · <span class="badge ${escapeHtml(
+          job.status || ""
+        )}">${escapeHtml(result)}</span></span>
+      </button></li>`;
+    })
+    .join("");
+}
+
+async function refreshRecent() {
+  const { res, data } = await api("/api/jobs");
+  if (res.ok) renderRecent(data.jobs || []);
 }
 
 function updateEngineStatus(data) {
@@ -152,6 +235,17 @@ function updateEngineStatus(data) {
 async function refreshHealth() {
   const { res, data } = await api("/api/health");
   if (res.ok && !$("app").hidden) updateEngineStatus(data);
+}
+
+/** Phones pause background tabs: catch up the moment the page is visible again. */
+function catchUp() {
+  if (document.visibilityState === "hidden") return;
+  if ($("app").hidden && $("loginScreen").hidden) {
+    init();
+    return;
+  }
+  refreshHealth();
+  if (currentJobId) pollJob();
 }
 
 function setJobStatus(status) {
@@ -306,8 +400,8 @@ async function startScrape() {
     return;
   }
 
-  currentJobId = data.job.id;
-  startPolling();
+  openJob(data.job.id);
+  refreshRecent();
 }
 
 function startPolling() {
@@ -317,28 +411,42 @@ function startPolling() {
 }
 
 async function pollJob() {
-  if (!currentJobId) return;
+  if (!currentJobId || polling) return;
+  polling = true;
+  try {
+    await pollJobOnce();
+  } finally {
+    polling = false;
+  }
+}
 
-  const { res, data } = await api(`/api/jobs/${currentJobId}`);
-  if (!res.ok) return;
+async function pollJobOnce() {
+  const jobId = currentJobId;
+  const { res, data } = await api(`/api/jobs/${jobId}`);
+  if (res.status === 401) {
+    showLogin();
+    return;
+  }
+  if (!res.ok || jobId !== currentJobId) return;
 
   const job = data.job;
+  const running = !["completed", "failed"].includes(job.status);
+  $("startBtn").disabled = running;
   $("progressPanel").hidden = false;
   $("scanCity").textContent = job.location || "";
   setJobStatus(job.status);
   renderProgress(job);
   renderLog(job.log || []);
 
-  if (job.status === "completed") {
+  if (!running) {
     clearInterval(pollTimer);
-    $("startBtn").disabled = false;
-    $("resultCity").textContent = job.location;
-    await loadLeads(currentJobId);
+    pollTimer = null;
+    refreshRecent();
   }
-
-  if (job.status === "failed") {
-    clearInterval(pollTimer);
-    $("startBtn").disabled = false;
+  if (job.status === "completed" && leadsShownFor !== jobId) {
+    leadsShownFor = jobId;
+    $("resultCity").textContent = job.location;
+    await loadLeads(jobId);
   }
 }
 
@@ -373,13 +481,13 @@ async function loadLeads(jobId) {
     .map(
       (lead) => `
       <tr>
-        <td>
+        <td data-label="Lead"><div>
           <span class="lead-badge ${escapeHtml(statusOf(lead).toLowerCase())}">${escapeHtml(
             LEAD_LABELS[statusOf(lead)] || statusOf(lead)
           )}${lead.score ? ` · ${escapeHtml(lead.score)}` : ""}</span>
           ${lead.reasons ? `<span class="lead-reasons">${escapeHtml(lead.reasons)}</span>` : ""}
-        </td>
-        <td><strong>${
+        </div></td>
+        <td data-label="Business"><div><strong>${
           safeUrl(lead.google_maps_link)
             ? `<a href="${escapeHtml(safeUrl(lead.google_maps_link))}" target="_blank" rel="noopener">${escapeHtml(
                 lead.business_name || "—"
@@ -391,16 +499,24 @@ async function loadLeads(jobId) {
                 lead.website
               )}</a></span>`
             : ""
-        }</td>
-        <td>${escapeHtml(lead.location || lead.address || "—")}</td>
-        <td>${escapeHtml(lead.phone || "—")}</td>
-        <td>${escapeHtml(lead.email || "—")}</td>
-        <td>${
-          safeUrl(lead.whatsapp)
-            ? `<a href="${escapeHtml(safeUrl(lead.whatsapp))}" target="_blank" rel="noopener">Open</a>`
+        }</div></td>
+        <td data-label="Location"><div>${escapeHtml(lead.location || lead.address || "—")}</div></td>
+        <td data-label="Phone"><div>${
+          telLink(lead.phone)
+            ? `<a href="${escapeHtml(telLink(lead.phone))}">${escapeHtml(lead.phone)}</a>`
+            : escapeHtml(lead.phone || "—")
+        }</div></td>
+        <td data-label="Email"><div>${
+          lead.email
+            ? `<a href="mailto:${escapeHtml(lead.email.split(";")[0].trim())}">${escapeHtml(lead.email)}</a>`
             : "—"
-        }</td>
-        <td>${escapeHtml(lead.category || "—")}</td>
+        }</div></td>
+        <td data-label="WhatsApp"><div>${
+          safeUrl(lead.whatsapp)
+            ? `<a href="${escapeHtml(safeUrl(lead.whatsapp))}" target="_blank" rel="noopener">WhatsApp</a>`
+            : "—"
+        }</div></td>
+        <td data-label="Category"><div>${escapeHtml(lead.category || "—")}</div></td>
       </tr>`
     )
     .join("");
@@ -423,6 +539,11 @@ async function loadLeads(jobId) {
   };
 }
 
+function telLink(phone) {
+  const digits = String(phone || "").replace(/[^\d+]/g, "");
+  return digits.replace(/\D/g, "").length >= 9 ? `tel:${digits}` : "";
+}
+
 function countField(leads, field) {
   return leads.filter((lead) => String(lead[field] || "").trim()).length;
 }
@@ -443,7 +564,7 @@ $("loginForm").addEventListener("submit", async (e) => {
 
   if (data.token) {
     authToken = data.token;
-    sessionStorage.setItem("webscrape_token", authToken);
+    writeToken(authToken);
   }
 
   $("loginError").hidden = true;
@@ -459,5 +580,17 @@ updateQueryCount();
 $("customCategories").addEventListener("input", updateQueryCount);
 $("suburbs").addEventListener("input", updateQueryCount);
 $("startBtn").addEventListener("click", startScrape);
+$("recentList").addEventListener("click", (e) => {
+  const item = e.target.closest("[data-job]");
+  if (!item) return;
+  openJob(item.dataset.job);
+  $("progressPanel").scrollIntoView({ behavior: "smooth", block: "start" });
+});
+document.addEventListener("visibilitychange", catchUp);
+window.addEventListener("focus", catchUp);
+window.addEventListener("online", catchUp);
+window.addEventListener("pageshow", (e) => {
+  if (e.persisted) catchUp();
+});
 init();
 setInterval(refreshHealth, 15000);
