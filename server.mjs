@@ -11,6 +11,7 @@ import {
 import { dirname, join, resolve, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
+import { totalmem, cpus } from "node:os";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = __dirname;
@@ -45,6 +46,13 @@ const DEFAULT_SCAN_CATEGORIES = [
 // killing any search that takes longer than a minute to scroll (deep scans).
 // This watchdog only stops a scraper that has stopped making progress.
 const SCRAPER_IDLE_LIMIT_MS = 20 * 60_000;
+
+// The scraper's headless browsers can eat all RAM and freeze the whole VM
+// (dashboard and SSH included). Cap it so only the scraper gets killed, and
+// size parallel browser tabs to the CPUs available.
+const SCRAPER_MEMORY_MB = Math.max(1024, Math.floor((totalmem() / 1048576) * 0.6));
+const DEFAULT_CONCURRENCY = Math.max(1, Math.min(4, cpus().length));
+const OOM_EXIT_CODE = 137;
 const DEFAULT_DEPTH = 10;
 const MAX_DEPTH = 30;
 const MAX_QUERIES = 400;
@@ -313,25 +321,30 @@ function runCommand(cmd, args, options = {}) {
       ...options,
     });
 
+    // Keep only the tail: long scrapes print far more than we ever need.
+    const TAIL = 8000;
     let stdout = "";
     let stderr = "";
 
     child.stdout?.on("data", (d) => {
       const text = d.toString();
-      stdout += text;
+      stdout = (stdout + text).slice(-TAIL);
       options.onStdout?.(text);
     });
 
     child.stderr?.on("data", (d) => {
       const text = d.toString();
-      stderr += text;
+      stderr = (stderr + text).slice(-TAIL);
       options.onStderr?.(text);
     });
 
     child.on("error", reject);
     child.on("close", (code) => {
-      if (code === 0) resolvePromise({ stdout, stderr });
-      else reject(new Error(stderr || stdout || `Exit code ${code}`));
+      if (code === 0) return resolvePromise({ stdout, stderr });
+      const lastLine = (stderr || stdout).trim().split(/\r?\n/).pop() || "";
+      const err = new Error(lastLine.slice(0, 300) || `Exit code ${code}`);
+      err.exitCode = code;
+      reject(err);
     });
   });
 }
@@ -377,6 +390,10 @@ async function runScrapeJob(job) {
     "--rm",
     "--name",
     containerName,
+    "--memory",
+    `${SCRAPER_MEMORY_MB}m`,
+    "--memory-swap",
+    `${SCRAPER_MEMORY_MB}m`,
     "-v",
     "gmaps-playwright-cache:/opt",
     "-v",
@@ -397,6 +414,7 @@ async function runScrapeJob(job) {
   if (job.auditSites) dockerArgs.push("-email");
 
   let stoppedIdle = false;
+  let ranOutOfMemory = false;
   const monitor = setInterval(() => {
     const p = job.progress;
     // Businesses written so far: covers scraper versions whose logs we can't count.
@@ -428,7 +446,12 @@ async function runScrapeJob(job) {
         onStderr: lineSplitter(onScraperLine),
       });
     } catch (err) {
-      if (!stoppedIdle) throw err;
+      if (err.exitCode === OOM_EXIT_CODE && !stoppedIdle) {
+        ranOutOfMemory = true;
+        appendLog(job, "The scraper ran out of memory and was stopped. Keeping what it found.");
+      } else if (!stoppedIdle) {
+        throw err;
+      }
     } finally {
       clearInterval(monitor);
     }
@@ -438,7 +461,9 @@ async function runScrapeJob(job) {
     }
     if (csvToObjects(resultsPath).length === 0) {
       throw new Error(
-        "Google Maps returned no businesses. Check the city spelling, or the server's IP may be blocked by Google (try again later)."
+        ranOutOfMemory
+          ? "The scraper ran out of memory before finding anything. Try fewer suburbs or business types, or Quick depth."
+          : "Google Maps returned no businesses. Check the city spelling, or the server's IP may be blocked by Google (try again later)."
       );
     }
 
@@ -632,7 +657,7 @@ const server = createServer(async (req, res) => {
         suburbs,
         queries,
         depth: clampInt(body.depth, 1, MAX_DEPTH, DEFAULT_DEPTH),
-        concurrency: clampInt(body.concurrency, 1, 16, 4),
+        concurrency: clampInt(body.concurrency, 1, 16, DEFAULT_CONCURRENCY),
         auditSites: Boolean(body.auditSites),
         status: "queued",
         createdAt: new Date().toISOString(),
