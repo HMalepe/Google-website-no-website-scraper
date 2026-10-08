@@ -39,6 +39,12 @@ const DEFAULT_SCAN_CATEGORIES = [
 ];
 
 // gosom -depth = how far it scrolls each Maps result list (its own default is 10).
+// gosom exits by itself once every search and business is done. Its
+// -exit-on-inactivity flag is not used: before the first job finishes it
+// measures idle time from year 0001 and quits at the first 1-minute check,
+// killing any search that takes longer than a minute to scroll (deep scans).
+// This watchdog only stops a scraper that has stopped making progress.
+const SCRAPER_IDLE_LIMIT_MS = 20 * 60_000;
 const DEFAULT_DEPTH = 10;
 const MAX_DEPTH = 30;
 const MAX_QUERIES = 400;
@@ -217,11 +223,13 @@ function handleScraperLine(job, line) {
   if (ev.message === "job finished" && typeof ev.job === "string") {
     if (ev.job.includes("/maps/search/")) {
       p.searchesDone++;
+      p.lastActivityAt = Date.now();
       const label = searchLabel(ev.job);
       const verb = ev.status === "failed" ? "failed" : "done";
       appendLog(job, `Search ${p.searchesDone}/${p.searchesTotal} ${verb}: ${label}`);
     } else if (ev.job.includes("/maps/place/") && ev.status !== "failed") {
       p.placesDone++;
+      p.lastActivityAt = Date.now();
       p.businessesFound = Math.max(p.businessesFound, p.placesDone);
       if (p.placesDone % 25 === 0) appendLog(job, `${p.placesDone} businesses scraped so far`);
       scheduleSave(job);
@@ -230,8 +238,6 @@ function handleScraperLine(job, line) {
   }
   if (ev.message === "starting scrapemate") {
     appendLog(job, "Scraper engine started, opening Google Maps...");
-  } else if (ev.message === "exiting because of inactivity") {
-    appendLog(job, "Scraper idle, wrapping up...");
   } else if (ev.level === "error" && ev.message !== "error while processing job") {
     appendLog(job, `Scraper error: ${ev.error || ev.message}`);
   }
@@ -365,9 +371,12 @@ async function runScrapeJob(job) {
       (job.auditSites ? ", auditing websites" : "")
   );
 
+  const containerName = `gmaps-${job.id}`;
   const dockerArgs = [
     "run",
     "--rm",
+    "--name",
+    containerName,
     "-v",
     "gmaps-playwright-cache:/opt",
     "-v",
@@ -383,19 +392,31 @@ async function runScrapeJob(job) {
     String(job.depth),
     "-c",
     String(job.concurrency),
-    "-exit-on-inactivity",
-    "3m",
   ];
   // Email crawling visits each listing's website: only worth it when sites become leads.
   if (job.auditSites) dockerArgs.push("-email");
 
-  // Businesses written so far: covers scraper versions whose logs we can't count.
-  const rowCounter = setInterval(() => {
-    if (!existsSync(resultsPath)) return;
-    const rows = csvToObjects(resultsPath).length;
-    if (rows > job.progress.businessesFound) {
-      job.progress.businessesFound = rows;
-      scheduleSave(job);
+  let stoppedIdle = false;
+  const monitor = setInterval(() => {
+    const p = job.progress;
+    // Businesses written so far: covers scraper versions whose logs we can't count.
+    if (existsSync(resultsPath)) {
+      const rows = csvToObjects(resultsPath).length;
+      if (rows > p.businessesFound) {
+        p.businessesFound = rows;
+        p.lastActivityAt = Date.now();
+        scheduleSave(job);
+      }
+    }
+    const lastActivity = p.lastActivityAt || Date.parse(job.startedAt);
+    if (!stoppedIdle && Date.now() - lastActivity > SCRAPER_IDLE_LIMIT_MS) {
+      stoppedIdle = true;
+      appendLog(
+        job,
+        `No progress for ${SCRAPER_IDLE_LIMIT_MS / 60_000} minutes. Stopping the scraper and keeping what was found.`
+      );
+      // SIGTERM: gosom flushes results.csv and exits cleanly.
+      runCommand("docker", ["stop", containerName]).catch(() => {});
     }
   }, 5000);
 
@@ -406,8 +427,10 @@ async function runScrapeJob(job) {
         onStdout: lineSplitter(onScraperLine),
         onStderr: lineSplitter(onScraperLine),
       });
+    } catch (err) {
+      if (!stoppedIdle) throw err;
     } finally {
-      clearInterval(rowCounter);
+      clearInterval(monitor);
     }
 
     if (!existsSync(resultsPath)) {

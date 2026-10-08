@@ -53,9 +53,10 @@ $dockerArgs = @(
     "-input", "/queries.txt",
     "-results", "/out/results.csv",
     "-depth", "$Depth",
-    "-c", "$Concurrency",
-    "-exit-on-inactivity", "3m"
+    "-c", "$Concurrency"
 )
+# No -exit-on-inactivity: it quits after ~1 minute if the first search is still
+# scrolling (deep scans). gosom exits by itself when all searches are done.
 if ($Email) { $dockerArgs += "-email" }
 
 Write-Host ""
