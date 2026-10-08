@@ -8,6 +8,9 @@
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
+    <div class="conn-banner" id="connBanner" role="status" hidden>
+      Can't reach the server. Retrying automatically…
+    </div>
     <div class="login-screen" id="loginScreen" hidden>
       <div class="login-card panel">
         <p class="eyebrow">Selantra</p>
@@ -87,6 +90,11 @@
             placeholder="Extra types, one per line (optional)"
           ></textarea>
         </details>
+      </section>
+
+      <section class="panel recent-panel" id="recentPanel" hidden>
+        <h2>Recent scans</h2>
+        <ul class="recent-list" id="recentList"></ul>
       </section>
 
       <section class="stats" id="stats" hidden>
