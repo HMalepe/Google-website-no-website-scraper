@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Selantra WebScrape</title>
-    <meta name="description" content="Find local businesses with no website — any city in South Africa." />
+    <meta name="description" content="Find local businesses with no website or a weak one — any city in South Africa." />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
@@ -27,8 +27,9 @@
           <p class="eyebrow">selantra.co.za</p>
           <h1>WebScrape</h1>
           <p class="subtitle">
-            Type any <strong>city</strong>. Get businesses with <strong>no website</strong>, their
-            <strong>location</strong>, and <strong>phone / email / WhatsApp</strong>.
+            Type any <strong>city</strong>. Get businesses with <strong>no website</strong> (or a weak
+            one), their <strong>location</strong>, and <strong>phone / email / WhatsApp</strong>,
+            best leads first.
           </p>
         </div>
         <div class="status-pill" id="engineStatus">Checking…</div>
@@ -49,6 +50,34 @@
           Scans plumbers, electricians, salons, restaurants, dentists, and more in that city.
         </p>
 
+        <label for="suburbs" class="city-label field-label">Suburbs to sweep (optional — more leads)</label>
+        <textarea
+          id="suburbs"
+          rows="2"
+          placeholder="Randburg, Sandton, Fourways, Roodepoort… (comma or one per line)"
+        ></textarea>
+        <p class="hint">
+          Each business type is searched in every suburb, so you reach the small businesses a
+          city-wide search never shows. Duplicates are removed.
+        </p>
+
+        <div class="options-row">
+          <label class="option">
+            <span>Search depth</span>
+            <select id="depth">
+              <option value="1">Quick (top results only)</option>
+              <option value="5">Standard</option>
+              <option value="10" selected>Deep (recommended)</option>
+              <option value="20">Max (slowest)</option>
+            </select>
+          </label>
+          <label class="option checkbox">
+            <input id="auditSites" type="checkbox" />
+            <span>Also find businesses with <strong>outdated or broken websites</strong> (slower)</span>
+          </label>
+        </div>
+        <p class="hint" id="queryCount"></p>
+
         <details class="advanced">
           <summary>Advanced: pick specific business types</summary>
           <div class="chips" id="categoryChips"></div>
@@ -62,8 +91,16 @@
 
       <section class="stats" id="stats" hidden>
         <div class="stat-card">
-          <span class="stat-label">No website + contact</span>
+          <span class="stat-label">Leads + contact</span>
           <span class="stat-value" id="statLeads">0</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">No website / social only</span>
+          <span class="stat-value" id="statNoSite">0</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">Weak website</span>
+          <span class="stat-value" id="statWeakSite">0</span>
         </div>
         <div class="stat-card">
           <span class="stat-label">Phone</span>
@@ -72,10 +109,6 @@
         <div class="stat-card">
           <span class="stat-label">Email</span>
           <span class="stat-value" id="statEmail">0</span>
-        </div>
-        <div class="stat-card">
-          <span class="stat-label">WhatsApp</span>
-          <span class="stat-value" id="statWhatsapp">0</span>
         </div>
       </section>
 
@@ -96,6 +129,7 @@
           <table>
             <thead>
               <tr>
+                <th>Lead</th>
                 <th>Business</th>
                 <th>Location</th>
                 <th>Phone</th>

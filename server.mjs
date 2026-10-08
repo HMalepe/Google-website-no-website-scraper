@@ -35,6 +35,11 @@ const DEFAULT_SCAN_CATEGORIES = [
   "lawyers",
 ];
 
+// gosom -depth = how far it scrolls each Maps result list (its own default is 10).
+const DEFAULT_DEPTH = 10;
+const MAX_DEPTH = 30;
+const MAX_QUERIES = 400;
+
 let activeJob = null;
 
 const MIME = {
@@ -150,16 +155,33 @@ function appendLog(job, line) {
   saveJob(job);
 }
 
-function buildQueries(location, categories) {
+function cleanList(values) {
+  return [...new Set((values || []).map((v) => String(v).trim()).filter(Boolean))];
+}
+
+/** Every category in every suburb (or just the city), e.g. "plumbers in Randburg, Johannesburg". */
+function buildQueries(location, categories, suburbs) {
   const loc = String(location || "").trim();
   if (!loc) throw new Error("City is required.");
 
-  const cats = (categories || [])
-    .map((c) => String(c).trim())
-    .filter(Boolean);
-
+  const cats = cleanList(categories);
   const list = cats.length > 0 ? cats : DEFAULT_SCAN_CATEGORIES;
-  return list.map((cat) => `${cat} in ${loc}`);
+  const areas = cleanList(suburbs).map((s) => `${s}, ${loc}`);
+  if (areas.length === 0) areas.push(loc);
+
+  return areas.flatMap((area) => list.map((cat) => `${cat} in ${area}`));
+}
+
+function clampInt(value, min, max, fallback) {
+  const n = Math.round(Number(value));
+  if (!Number.isFinite(n) || n < min) return fallback;
+  return Math.min(n, max);
+}
+
+/** Newest lead file for a job (leads.csv; older jobs only have no-website-leads.csv). */
+function leadsFile(id) {
+  const all = join(JOBS, id, "leads.csv");
+  return existsSync(all) ? all : join(JOBS, id, "no-website-leads.csv");
 }
 
 function getAuthToken(req) {
@@ -224,7 +246,6 @@ async function runScrapeJob(job) {
   const jobDir = join(JOBS, job.id);
   const queriesPath = join(jobDir, "queries.txt");
   const resultsPath = join(jobDir, "results.csv");
-  const leadsPath = join(jobDir, "no-website-leads.csv");
 
   mkdirSync(jobDir, { recursive: true });
   writeFileSync(queriesPath, job.queries.join("\n") + "\n", "utf8");
@@ -232,7 +253,11 @@ async function runScrapeJob(job) {
   job.status = "scraping";
   job.startedAt = new Date().toISOString();
   saveJob(job);
-  appendLog(job, `Starting scrape for ${job.location} (${job.queries.length} queries)`);
+  appendLog(
+    job,
+    `Starting scrape for ${job.location}: ${job.queries.length} searches, depth ${job.depth}` +
+      (job.auditSites ? ", auditing websites" : "")
+  );
 
   const dockerArgs = [
     "run",
@@ -254,8 +279,9 @@ async function runScrapeJob(job) {
     String(job.concurrency),
     "-exit-on-inactivity",
     "3m",
-    "-email",
   ];
+  // Email crawling visits each listing's website: only worth it when sites become leads.
+  if (job.auditSites) dockerArgs.push("-email");
 
   try {
     await runCommand("docker", dockerArgs, {
@@ -277,22 +303,31 @@ async function runScrapeJob(job) {
 
     job.status = "filtering";
     saveJob(job);
-    appendLog(job, "Scrape done. Filtering no-website leads...");
+    appendLog(
+      job,
+      job.auditSites
+        ? "Scrape done. Filtering leads and auditing websites..."
+        : "Scrape done. Filtering no-website leads..."
+    );
 
-    await runCommand("node", [
-      join(ROOT, "scripts", "filter-no-website.mjs"),
-      resultsPath,
-      jobDir,
-    ]);
+    const filterArgs = [join(ROOT, "scripts", "filter-no-website.mjs"), resultsPath, jobDir];
+    if (job.auditSites) filterArgs.push("--audit");
+    await runCommand("node", filterArgs, {
+      onStdout: (text) => {
+        for (const line of text.split(/\r?\n/)) {
+          if (line.startsWith("[audit]")) appendLog(job, line);
+        }
+      },
+    });
 
     const summaryPath = join(jobDir, "summary.json");
     job.summary = existsSync(summaryPath)
       ? JSON.parse(readFileSync(summaryPath, "utf8"))
       : null;
-    job.leadCount = csvToObjects(leadsPath).length;
+    job.leadCount = csvToObjects(leadsFile(job.id)).length;
     job.status = "completed";
     job.finishedAt = new Date().toISOString();
-    appendLog(job, `Done. ${job.leadCount} no-website leads with contact info.`);
+    appendLog(job, `Done. ${job.leadCount} leads with contact info.`);
   } catch (err) {
     job.status = "failed";
     job.error = err.message;
@@ -380,12 +415,11 @@ const server = createServer(async (req, res) => {
     if (req.method === "GET" && url.pathname.startsWith("/api/leads/")) {
       if (!requireAuth(req, res)) return;
       const id = url.pathname.split("/")[3];
-      const leadsPath = join(JOBS, id, "no-website-leads.csv");
       const job = loadJob(id);
       if (!job) return json(res, 404, { error: "Job not found" });
       return json(res, 200, {
         jobId: id,
-        leads: csvToObjects(leadsPath),
+        leads: csvToObjects(leadsFile(id)),
         summary: job.summary ?? null,
       });
     }
@@ -393,11 +427,12 @@ const server = createServer(async (req, res) => {
     if (req.method === "GET" && url.pathname.startsWith("/api/download/")) {
       if (!requireAuth(req, res)) return;
       const id = url.pathname.split("/")[3];
-      const leadsPath = join(JOBS, id, "no-website-leads.csv");
+      if (!loadJob(id)) return json(res, 404, { error: "Job not found" });
+      const leadsPath = leadsFile(id);
       if (!existsSync(leadsPath)) return json(res, 404, { error: "No leads file" });
       res.writeHead(200, {
         "Content-Type": "text/csv; charset=utf-8",
-        "Content-Disposition": `attachment; filename="no-website-leads-${id}.csv"`,
+        "Content-Disposition": `attachment; filename="leads-${id}.csv"`,
       });
       res.end(readFileSync(leadsPath));
       return;
@@ -426,16 +461,23 @@ const server = createServer(async (req, res) => {
         return json(res, 400, { error: "City is required." });
       }
       const categories = Array.isArray(body.categories) ? body.categories : [];
-      const depth = Number(body.depth || 1);
-      const concurrency = Number(body.concurrency || 4);
+      const suburbs = Array.isArray(body.suburbs) ? cleanList(body.suburbs) : [];
+      const queries = buildQueries(location, categories, suburbs);
+      if (queries.length > MAX_QUERIES) {
+        return json(res, 400, {
+          error: `That is ${queries.length} searches (max ${MAX_QUERIES}). Use fewer suburbs or business types.`,
+        });
+      }
 
       const job = {
         id: randomUUID().slice(0, 8),
         location,
         categories,
-        queries: buildQueries(location, categories),
-        depth,
-        concurrency,
+        suburbs,
+        queries,
+        depth: clampInt(body.depth, 1, MAX_DEPTH, DEFAULT_DEPTH),
+        concurrency: clampInt(body.concurrency, 1, 16, 4),
+        auditSites: Boolean(body.auditSites),
         status: "queued",
         createdAt: new Date().toISOString(),
         startedAt: null,
