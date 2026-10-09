@@ -17,6 +17,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: Install
+        run: npm ci
       - name: Syntax checks
         run: |
           for f in server.mjs public/app.js scripts/*.mjs tests/*.mjs; do node --check "$f"; done

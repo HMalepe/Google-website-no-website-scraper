@@ -33,7 +33,8 @@ for (const line of readFileSync(queriesHost, "utf8").split("\n").filter(Boolean)
     Object.assign(row, {
       input_id: id,
       link: `https://www.google.com/maps/place/${id}-${i}`,
-      title: `${query} biz ${i}`,
+      title: `${query.split(" in ")[0]} biz ${i}`,
+      category: i % 2 ? "Hairdresser" : "Hair salon",
       place_id: `${id}-${i}`,
       open_hours: JSON.stringify(hours),
       // mobile on even rows, landline on odd rows

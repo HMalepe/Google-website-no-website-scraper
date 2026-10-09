@@ -14,6 +14,7 @@ import { dirname, join, resolve, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID, createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { totalmem, cpus } from "node:os";
+import { buildLeadsPdf } from "./scripts/leads-pdf.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = __dirname;
@@ -878,6 +879,66 @@ async function recoverInterruptedWork() {
   }
 }
 
+// Business photos come from Google's image CDN. Fetch only from there (no
+// arbitrary URLs from scraped data), small, and only formats PDFs can embed.
+const PHOTO_HOSTS = /(^|\.)(googleusercontent\.com|ggpht\.com)$/i;
+const MAX_PHOTO_BYTES = 600_000;
+
+async function fetchPhoto(url) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "https:" || !PHOTO_HOSTS.test(parsed.hostname)) return null;
+  const res = await fetch(parsed, {
+    redirect: "error",
+    signal: AbortSignal.timeout(6000),
+    headers: { Accept: "image/jpeg,image/png;q=0.9,*/*;q=0.1" },
+  });
+  if (!res.ok) return null;
+  const bytes = Buffer.from(await res.arrayBuffer());
+  if (bytes.length > MAX_PHOTO_BYTES) return null;
+  const isJpeg = bytes[0] === 0xff && bytes[1] === 0xd8;
+  const isPng = bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47;
+  return isJpeg || isPng ? bytes : null;
+}
+
+/**
+ * Leads for the PDF, enriched from the raw results: the business type and
+ * suburb that were searched (via input_id -> searches.json), and photos for
+ * scans made before leads.csv kept them.
+ */
+function leadsForReport(id) {
+  const leads = csvToObjects(leadsFile(id));
+  const searchesPath = join(JOBS, id, "searches.json");
+  const searches = new Map(
+    (existsSync(searchesPath) ? JSON.parse(readFileSync(searchesPath, "utf8")) : []).map((s) => [s.id, s])
+  );
+  const byLink = new Map(csvToObjects(join(JOBS, id, "results.csv")).map((r) => [r.link, r]));
+  return leads.map((lead) => {
+    const raw = byLink.get(lead.google_maps_link) || {};
+    const search = searches.get(String(raw.input_id || "").trim());
+    return {
+      ...lead,
+      thumbnail: lead.thumbnail || raw.thumbnail || "",
+      search_type: search?.category || "",
+      area: search?.area || "",
+    };
+  });
+}
+
+function reportSubtitle(job) {
+  const date = new Date(job.finishedAt || job.createdAt || Date.now()).toLocaleDateString("en-ZA", {
+    day: "numeric", month: "short", year: "numeric",
+  });
+  const parts = [`Scanned ${date}`];
+  if (job.suburbs?.length) parts.push(job.suburbs.join(", "));
+  if (job.categories?.length) parts.push(job.categories.join(", "));
+  return parts.join(" · ");
+}
+
 function serveStatic(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
   let filePath = join(PUBLIC, url.pathname === "/" ? "index.html" : url.pathname);
@@ -1070,6 +1131,32 @@ const server = createServer(async (req, res) => {
         return res.end(readFileSync(file));
       }
       return json(res, 200, JSON.parse(readFileSync(file, "utf8")));
+    }
+
+    if (req.method === "GET" && /^\/api\/report\/[a-f0-9]{8}\/pdf$/.test(url.pathname)) {
+      if (!requireAuth(req, res)) return;
+      const id = routeId(url);
+      const job = loadJob(id);
+      if (!job || !existsSync(leadsFile(id))) return json(res, 404, { error: "No leads for this scan" });
+      // Cached until the leads change (photos make generation take a few seconds).
+      const pdfPath = join(JOBS, id, "leads.pdf");
+      const fresh = existsSync(pdfPath) && statSync(pdfPath).mtimeMs >= statSync(leadsFile(id)).mtimeMs;
+      if (!fresh) {
+        const pdf = await buildLeadsPdf({
+          leads: leadsForReport(id),
+          title: `Leads - ${job.location}`,
+          subtitle: reportSubtitle(job),
+          fetchImage: fetchPhoto,
+        });
+        writeFileSync(pdfPath, pdf);
+      }
+      const name = `leads-${String(job.location).replace(/[^a-z0-9]+/gi, "-").toLowerCase()}-${id}.pdf`;
+      res.writeHead(200, {
+        "Content-Type": "application/pdf",
+        "Content-Disposition": `attachment; filename="${name}"`,
+        "Cache-Control": "no-store",
+      });
+      return res.end(readFileSync(pdfPath));
     }
 
     if (req.method === "GET" && url.pathname.startsWith("/api/download/")) {

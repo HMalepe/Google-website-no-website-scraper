@@ -12,7 +12,10 @@ RUN python3 -m venv /opt/trends \
   && /opt/trends/bin/pip install --no-cache-dir -r tools/requirements.txt
 ENV TRENDS_PYTHON=/opt/trends/bin/python
 
-COPY package.json server.mjs ./
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev && npm cache clean --force
+
+COPY server.mjs ./
 COPY public ./public
 COPY scripts ./scripts
 COPY tools ./tools
