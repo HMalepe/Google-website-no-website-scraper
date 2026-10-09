@@ -141,7 +141,10 @@
       <section class="panel progress-panel" id="progressPanel" hidden>
         <div class="progress-head">
           <h2><span id="scanVerb">Scanning</span> <span id="scanCity"></span></h2>
-          <span class="badge" id="jobStatus">queued</span>
+          <div class="progress-actions">
+            <button type="button" class="btn btn-ghost btn-small" id="stopBtn" hidden>Stop scan</button>
+            <span class="badge" id="jobStatus">queued</span>
+          </div>
         </div>
         <ol class="steps" id="steps"></ol>
         <div class="bar" id="bar"><div class="bar-fill" id="barFill"></div></div>

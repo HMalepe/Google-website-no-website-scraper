@@ -39,13 +39,14 @@ DEFAULT_TERMS = ("knotless braids,lace front wig,gel nails,acrylic nails,"
 
 
 # ------------------------------------------------------------------ Fetch (network)
-def _retry(fn, tries=5, base=8):
+def _retry(fn, tries=4, base=10):
+    """Back off and retry only on rate limits / timeouts; other errors fail at once."""
     for i in range(tries):
         try:
             return fn()
         except Exception as e:  # noqa: BLE001
             msg = str(e)
-            if "429" in msg or "Too Many" in msg or "response" in msg.lower():
+            if "429" in msg or "Too Many" in msg or "timed out" in msg.lower() or "Timeout" in type(e).__name__:
                 wait = base * (2 ** i)
                 print(f"[!] rate limited / transient error, waiting {wait}s ({i+1}/{tries})", file=sys.stderr)
                 time.sleep(wait)

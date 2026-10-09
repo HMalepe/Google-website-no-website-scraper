@@ -1,0 +1,51 @@
+#!/usr/bin/env node
+// Stand-in for the docker CLI in tests. `run` imitates gosom/google-maps-scraper:
+// reads "query #!# id" lines and writes a gosom-format CSV plus its log lines.
+import { readFileSync, writeFileSync, appendFileSync } from "node:fs";
+
+const args = process.argv.slice(2);
+const cmd = args[0];
+if (cmd === "version" || cmd === "stop" || cmd === "rm") process.exit(0);
+if (cmd === "ps") process.exit(0); // no leftover containers
+if (cmd !== "run") process.exit(0);
+
+const after = (flag) => args[args.indexOf(flag) + 1];
+const mounts = args.filter((_, i) => args[i - 1] === "-v");
+const queriesHost = mounts.find((m) => m.endsWith(":/queries.txt:ro")).replace(/:\/queries\.txt:ro$/, "");
+const outHost = mounts.find((m) => m.endsWith(":/out")).replace(/:\/out$/, "");
+const results = `${outHost}/${after("-results").replace(/^\/out\//, "")}`;
+if (process.env.STUB_DOCKER_LOG) appendFileSync(process.env.STUB_DOCKER_LOG, args.join(" ") + "\n");
+
+const H = ["input_id","link","title","category","address","open_hours","popular_times","website","phone","plus_code","review_count","review_rating","reviews_per_rating","latitude","longitude","cid","status","descriptions","reviews_link","thumbnail","timezone","price_range","data_id","street_view_url","place_id","images","reservations","order_online","menu","owner","complete_address","credit_cards_accepted","about","user_reviews","user_reviews_extended","emails"];
+const esc = (v) => (/[",\n]/.test(v) ? `"${String(v).replace(/"/g, '""')}"` : String(v));
+const lines = [H.join(",")];
+const days = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
+for (const line of readFileSync(queriesHost, "utf8").split("\n").filter(Boolean)) {
+  const [query, id] = line.split("#!#").map((x) => x.trim());
+  const weak = /Randburg/.test(query); // Randburg: poorly served; elsewhere: saturated
+  for (let i = 0; i < (weak ? 6 : 4); i++) {
+    const hours = Object.fromEntries(days.map((d) => [d, [weak ? "9 am–5 pm" : "8 am–9 pm"]]));
+    hours.Sunday = [weak ? "Closed" : "10 am–2 pm"];
+    const reviews = weak
+      ? [{ Rating: 1, Description: "Waited two hours and the staff were rude" }, { Rating: 5, Description: "Great" }]
+      : [{ Rating: 5, Description: "Excellent" }];
+    const row = Object.fromEntries(H.map((h) => [h, ""]));
+    Object.assign(row, {
+      input_id: id,
+      link: `https://www.google.com/maps/place/${id}-${i}`,
+      title: `${query} biz ${i}`,
+      place_id: `${id}-${i}`,
+      open_hours: JSON.stringify(hours),
+      // mobile on even rows, landline on odd rows
+      phone: i % 2 === 0 ? `082 000 00${i}${i}` : `011 000 00${i}${i}`,
+      website: weak ? "" : "https://example.co.za",
+      review_count: weak ? "30" : "400",
+      review_rating: weak ? "3.9" : "4.7",
+      complete_address: `${i} Main Rd`,
+      user_reviews: JSON.stringify(reviews),
+    });
+    lines.push(H.map((h) => esc(row[h])).join(","));
+  }
+  process.stderr.write(JSON.stringify({ message: "job finished", status: "success", job: `Job{URL: https://www.google.com/maps/search/${encodeURIComponent(query).replace(/%20/g, "+")}, x}` }) + "\n");
+}
+writeFileSync(results, lines.join("\n") + "\n");

@@ -12,6 +12,8 @@
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -247,20 +249,25 @@ function digitsOnly(value) {
   return String(value ?? "").replace(/\D/g, "");
 }
 
+/**
+ * wa.me link for numbers that can actually have WhatsApp. South African
+ * landlines (01x-05x) and 086/087 numbers can't, so they get no link; SA
+ * mobiles are 06x, 07x and 081-084. Foreign numbers (+ other country code)
+ * are kept as given.
+ */
 function toWhatsAppLink(phone) {
-  const digits = digitsOnly(phone);
+  const raw = String(phone ?? "").trim();
+  const digits = digitsOnly(raw);
   if (!digits) return "";
 
-  let normalized = digits;
-  if (normalized.startsWith("0") && normalized.length === 10) {
-    normalized = `27${normalized.slice(1)}`;
-  } else if (normalized.length === 9 && /^[67]/.test(normalized)) {
-    normalized = `27${normalized}`;
-  }
+  let national = "";
+  if (digits.startsWith("27") && digits.length === 11) national = digits.slice(2);
+  else if (digits.startsWith("0") && digits.length === 10) national = digits.slice(1);
+  else if (digits.length === 9 && !raw.startsWith("+")) national = digits;
+  else if (raw.startsWith("+") && digits.length >= 10) return `https://wa.me/${digits}`;
+  else return "";
 
-  if (normalized.length < 10) return "";
-
-  return `https://wa.me/${normalized}`;
+  return /^(6|7|8[1-4])/.test(national) ? `https://wa.me/27${national}` : "";
 }
 
 function extractEmailsFromText(...chunks) {
@@ -516,20 +523,83 @@ async function readCapped(res, cap) {
  * Fetch one site and audit it. Returns { verdict, score, reasons }:
  * verdict "audited" (scored), "broken" (dead site = lead), "unverified" (blocked/timeout = skip).
  */
+// Website URLs come from Google Maps listings, which anyone can edit. Never let
+// one make this server fetch its own network (cloud metadata at 169.254.169.254,
+// localhost, the dashboard, the LAN). Tests set AUDIT_ALLOW_PRIVATE=1.
+const ALLOW_PRIVATE = process.env.AUDIT_ALLOW_PRIVATE === "1";
+const MAX_REDIRECTS = 5;
+
+function isPrivateAddress(ip) {
+  const v = String(ip).toLowerCase();
+  if (isIP(v) === 4) {
+    const [a, b] = v.split(".").map(Number);
+    return (
+      a === 0 || a === 10 || a === 127 || a >= 224 ||
+      (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) ||
+      (a === 100 && b >= 64 && b <= 127)
+    );
+  }
+  if (v.startsWith("::ffff:")) return isPrivateAddress(v.slice(7));
+  return v === "::" || v === "::1" || /^(fc|fd|fe8|fe9|fea|feb)/.test(v);
+}
+
+async function assertPublicHost(hostname) {
+  if (ALLOW_PRIVATE) return;
+  const host = hostname.replace(/^\[|\]$/g, "");
+  const addresses = isIP(host) ? [{ address: host }] : await lookup(host, { all: true });
+  if (addresses.some((a) => isPrivateAddress(a.address))) {
+    const err = new Error("private address");
+    err.code = "PRIVATE_ADDRESS";
+    throw err;
+  }
+}
+
+/** fetch() with every redirect hop checked against private addresses. */
+async function fetchPublic(startUrl, init) {
+  let url = new URL(startUrl);
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+    if (!/^https?:$/.test(url.protocol)) {
+      const err = new Error("unsupported protocol");
+      err.code = "BAD_PROTOCOL";
+      throw err;
+    }
+    await assertPublicHost(url.hostname);
+    const res = await fetch(url, { ...init, redirect: "manual" });
+    const location = res.headers.get("location");
+    if (res.status >= 300 && res.status < 400 && location) {
+      res.body?.cancel().catch(() => {});
+      url = new URL(location, url);
+      continue;
+    }
+    return { res, finalUrl: url.href };
+  }
+  const err = new Error("too many redirects");
+  err.code = "TOO_MANY_REDIRECTS";
+  throw err;
+}
+
 async function auditSite(url) {
   let res;
+  let finalUrl = url;
   try {
-    res = await fetch(normalizeUrl(url), {
-      redirect: "follow",
+    ({ res, finalUrl } = await fetchPublic(normalizeUrl(url), {
       signal: AbortSignal.timeout(AUDIT_TIMEOUT_MS),
       headers: {
         "User-Agent": USER_AGENT,
         Accept: "text/html,application/xhtml+xml,*/*;q=0.8",
         "Accept-Language": "en-ZA,en;q=0.9",
       },
-    });
+    }));
   } catch (err) {
     const code = err?.cause?.code ?? err?.code ?? "";
+    if (code === "PRIVATE_ADDRESS" || code === "BAD_PROTOCOL") {
+      return { verdict: "unverified", score: 0, reasons: ["website points to a private/internal address (skipped)"] };
+    }
+    if (code === "TOO_MANY_REDIRECTS") {
+      return { verdict: "broken", score: 80, reasons: ["website redirects in a loop"] };
+    }
     if (code === "ENOTFOUND") {
       return { verdict: "broken", score: OUTDATED_MAX_SCORE, reasons: ["domain does not resolve (site is dead)"] };
     }
@@ -556,7 +626,7 @@ async function auditSite(url) {
     return { verdict: "broken", score: 80, reasons: [`site returns HTTP ${res.status}`] };
   }
 
-  const { score, reasons } = auditHtml(html, res.url || url);
+  const { score, reasons } = auditHtml(html, finalUrl);
   return { verdict: "audited", score, reasons };
 }
 

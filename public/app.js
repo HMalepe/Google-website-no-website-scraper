@@ -439,11 +439,22 @@ async function pollJobOnce() {
     showLogin();
     return;
   }
+  if (res.status === 404 && jobId === currentJobId) {
+    // The scan no longer exists: stop polling instead of retrying forever.
+    clearInterval(pollTimer);
+    pollTimer = null;
+    currentJobId = null;
+    $("progressPanel").hidden = true;
+    $("startBtn").disabled = false;
+    return;
+  }
   if (!res.ok || jobId !== currentJobId) return;
 
   const job = data.job;
   const running = !["completed", "failed"].includes(job.status);
   $("startBtn").disabled = running;
+  $("stopBtn").hidden = job.status !== "scraping";
+  $("stopBtn").disabled = Boolean(job.stopRequested);
   $("progressPanel").hidden = false;
   $("scanCity").textContent = job.location || "";
   setJobStatus(job.status);
@@ -672,6 +683,11 @@ function openTrend(id) {
 async function pollTrend() {
   if (!trendId) return;
   const { res, data } = await api(`/api/trends/${trendId}`);
+  if (res.status === 404) {
+    clearInterval(trendTimer);
+    trendId = null;
+    return;
+  }
   if (!res.ok) return;
   const t = data.trend;
   const running = t.status === "queued" || t.status === "running";
@@ -802,6 +818,16 @@ $("customCategories").addEventListener("input", updateQueryCount);
 $("suburbs").addEventListener("input", updateQueryCount);
 $("startBtn").addEventListener("click", startScrape);
 $("trendBtn").addEventListener("click", startTrend);
+$("stopBtn").addEventListener("click", async () => {
+  if (!currentJobId || !confirm("Stop this scan? Businesses found so far are kept.")) return;
+  $("stopBtn").disabled = true;
+  const { res, data } = await api(`/api/scrape/${currentJobId}/stop`, { method: "POST" });
+  if (!res.ok) {
+    alert(data.error || "Could not stop the scan.");
+    $("stopBtn").disabled = false;
+  }
+  pollJob();
+});
 for (const tab of document.querySelectorAll(".tab")) {
   tab.addEventListener("click", () => showView(tab.dataset.view));
 }

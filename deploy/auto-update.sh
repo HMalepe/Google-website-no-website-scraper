@@ -49,8 +49,16 @@ if find "$DATA_DIR/jobs" -name job.json -mmin -3 2>/dev/null \
   echo "$(date -Is) update waiting: scan in progress"
   exit 0
 fi
+# Trends checks back off for minutes between writes, hence the longer window.
+if find "$DATA_DIR/trends" -name trend.json -mmin -10 2>/dev/null \
+  | xargs -r grep -lE '"status": "(queued|running)"' | grep -q .; then
+  echo "$(date -Is) update waiting: trends check in progress"
+  exit 0
+fi
 
 echo "$(date -Is) updating $(git rev-parse --short HEAD) -> $(git rev-parse --short origin/main)"
 git merge -q --ff-only origin/main || { echo "$(date -Is) merge failed"; exit 1; }
 $DOCKER compose up -d --build
+# Each rebuild leaves the previous image behind; reclaim the disk space.
+$DOCKER image prune -f >/dev/null 2>&1 || true
 echo "$(date -Is) update done"
