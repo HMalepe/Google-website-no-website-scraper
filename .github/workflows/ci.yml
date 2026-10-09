@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Syntax checks
+        run: |
+          for f in server.mjs public/app.js scripts/*.mjs tests/*.mjs; do node --check "$f"; done
+          python -m py_compile tools/trends.py
+          for f in deploy/*.sh docker-entrypoint.sh; do bash -n "$f"; done
+      - name: Tests
+        run: npm test
+      - name: Docker image builds
+        run: docker build -t webscrape-ci .

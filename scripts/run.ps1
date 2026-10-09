@@ -21,5 +21,8 @@ if ($Audit) {
     & node "$PSScriptRoot\filter-no-website.mjs"
 }
 
+& node "$PSScriptRoot\market-insights.mjs" "output\results.csv" "output"
+
 Write-Host "Done. Main file: output\leads.csv (best leads first)"
+Write-Host "Market gaps: output\market.csv"
 Write-Host "No-website only: output\no-website-leads.csv"

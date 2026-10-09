@@ -12,7 +12,7 @@ import {
 } from "node:fs";
 import { dirname, join, resolve, extname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { totalmem, cpus } from "node:os";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -27,6 +27,17 @@ const PORT = Number(process.env.PORT || 3847);
 const ACCESS_PASSWORD = process.env.ACCESS_PASSWORD || "";
 const SITE_NAME = process.env.SITE_NAME || "Selantra WebScrape";
 const PUBLIC_URL = process.env.PUBLIC_URL || "";
+
+// The browser stores this derived token, never the password itself. It changes
+// whenever ACCESS_PASSWORD changes, which logs every device out.
+const SESSION_TOKEN = ACCESS_PASSWORD
+  ? createHmac("sha256", ACCESS_PASSWORD).update("webscrape-session-v1").digest("hex")
+  : "";
+const LOGIN_MAX_FAILURES = 10;
+const LOGIN_WINDOW_MS = 15 * 60_000;
+const loginFailures = new Map(); // ip -> { count, resetAt }
+// Job and trend ids are the first 8 hex chars of a UUID.
+const ID_PATTERN = /^[a-f0-9]{8}$/;
 
 const DEFAULT_SCAN_CATEGORIES = [
   "plumbers",
@@ -76,6 +87,7 @@ const TRENDS_PYTHON = process.env.TRENDS_PYTHON || "python3";
 const TRENDS_SCRIPT = join(ROOT, "tools", "trends.py");
 const TREND_TIMEFRAMES = ["today 3-m", "today 12-m", "today 5-y"];
 const MAX_TREND_TERMS = 10;
+const TREND_TIMEOUT_MS = 20 * 60_000;
 let activeTrend = null;
 let trendsAvailable = null;
 
@@ -92,7 +104,7 @@ mkdirSync(JOBS, { recursive: true });
 mkdirSync(TRENDS, { recursive: true });
 
 function json(res, status, body) {
-  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
+  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
   res.end(JSON.stringify(body));
 }
 
@@ -101,7 +113,10 @@ function readBody(req) {
     let data = "";
     req.on("data", (chunk) => {
       data += chunk;
-      if (data.length > 1_000_000) reject(new Error("Body too large"));
+      if (data.length > 1_000_000) {
+        req.destroy();
+        reject(new Error("Body too large"));
+      }
     });
     req.on("end", () => {
       if (!data) return resolvePromise({});
@@ -175,8 +190,36 @@ function csvToObjects(path) {
   });
 }
 
+const rowCountCache = new Map(); // path -> { size, rows }
+
+/**
+ * Data rows in a CSV without building objects (quote-aware, so newlines inside
+ * reviews don't count). Cached by file size: the progress monitor calls this
+ * every 5s and growing scrape files can be several MB.
+ */
 function csvRowCount(path) {
-  return existsSync(path) ? csvToObjects(path).length : 0;
+  if (!existsSync(path)) return 0;
+  const { size } = statSync(path);
+  const cached = rowCountCache.get(path);
+  if (cached && cached.size === size) return cached.rows;
+  const text = readFileSync(path, "utf8");
+  let records = 0;
+  let inQuotes = false;
+  let lineHasData = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text.charCodeAt(i);
+    if (ch === 34) inQuotes = !inQuotes; // "
+    else if (ch === 10 && !inQuotes) {
+      if (lineHasData) records++;
+      lineHasData = false;
+      continue;
+    }
+    if (ch !== 13 && ch !== 10) lineHasData = true;
+  }
+  if (lineHasData) records++;
+  const rows = Math.max(0, records - 1); // minus header
+  rowCountCache.set(path, { size, rows });
+  return rows;
 }
 
 /** Append one batch's CSV to the combined results (header only once), then delete it. */
@@ -350,9 +393,47 @@ function getAuthToken(req) {
   return String(req.headers["x-access-token"] || "").trim();
 }
 
+/** Constant-time string comparison (hashing first hides length differences). */
+function safeEqual(a, b) {
+  const ha = createHash("sha256").update(String(a)).digest();
+  const hb = createHash("sha256").update(String(b)).digest();
+  return timingSafeEqual(ha, hb);
+}
+
 function isAuthenticated(req) {
   if (!ACCESS_PASSWORD) return true;
-  return getAuthToken(req) === ACCESS_PASSWORD;
+  return safeEqual(getAuthToken(req), SESSION_TOKEN);
+}
+
+/** Caddy is the only client in production; it sets X-Forwarded-For. */
+function clientIp(req) {
+  const forwarded = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+  return forwarded || req.socket.remoteAddress || "unknown";
+}
+
+function loginBlocked(ip) {
+  const entry = loginFailures.get(ip);
+  if (!entry) return false;
+  if (Date.now() > entry.resetAt) {
+    loginFailures.delete(ip);
+    return false;
+  }
+  return entry.count >= LOGIN_MAX_FAILURES;
+}
+
+function recordLoginFailure(ip) {
+  const entry = loginFailures.get(ip);
+  if (!entry || Date.now() > entry.resetAt) {
+    loginFailures.set(ip, { count: 1, resetAt: Date.now() + LOGIN_WINDOW_MS });
+  } else {
+    entry.count++;
+  }
+}
+
+/** The id segment of /api/<resource>/<id>[/...], or null if it isn't a valid id. */
+function routeId(url) {
+  const id = url.pathname.split("/")[3] || "";
+  return ID_PATTERN.test(id) ? id : null;
 }
 
 function requireAuth(req, res) {
@@ -361,14 +442,22 @@ function requireAuth(req, res) {
   return false;
 }
 
-function runCommand(cmd, args, options = {}) {
+/**
+ * Run a program without a shell (arguments are never re-parsed, so paths with
+ * spaces and user text are safe on every OS). Optional timeoutMs kills it.
+ */
+function runCommand(cmd, args, { onStdout, onStderr, timeoutMs } = {}) {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(cmd, args, {
-      cwd: ROOT,
-      shell: process.platform === "win32",
-      env: process.env,
-      ...options,
-    });
+    const child = spawn(cmd, args, { cwd: ROOT, env: process.env, windowsHide: true });
+
+    let timedOut = false;
+    const timer = timeoutMs
+      ? setTimeout(() => {
+          timedOut = true;
+          child.kill("SIGTERM");
+          setTimeout(() => child.kill("SIGKILL"), 5000).unref();
+        }, timeoutMs)
+      : null;
 
     // Keep only the tail: long scrapes print far more than we ever need.
     const TAIL = 8000;
@@ -378,17 +467,26 @@ function runCommand(cmd, args, options = {}) {
     child.stdout?.on("data", (d) => {
       const text = d.toString();
       stdout = (stdout + text).slice(-TAIL);
-      options.onStdout?.(text);
+      onStdout?.(text);
     });
 
     child.stderr?.on("data", (d) => {
       const text = d.toString();
       stderr = (stderr + text).slice(-TAIL);
-      options.onStderr?.(text);
+      onStderr?.(text);
     });
 
-    child.on("error", reject);
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
     child.on("close", (code) => {
+      clearTimeout(timer);
+      if (timedOut) {
+        const err = new Error(`Timed out after ${Math.round(timeoutMs / 60_000)} minutes`);
+        err.timedOut = true;
+        return reject(err);
+      }
       if (code === 0) return resolvePromise({ stdout, stderr });
       const lastLine = (stderr || stdout).trim().split(/\r?\n/).pop() || "";
       const err = new Error(lastLine.slice(0, 300) || `Exit code ${code}`);
@@ -459,12 +557,14 @@ async function runScrapeJob(job) {
 
   try {
     for (const [index, batch] of batches.entries()) {
+      if (job.stopRequested) break;
       const batchQueries = join(jobDir, `queries-${index}.txt`);
       const batchResults = join(jobDir, `results-${index}.csv`);
       // "query #!# id": gosom searches the query and writes the id as input_id.
       writeFileSync(batchQueries, batch.map((b) => `${b.query} #!# ${b.id}`).join("\n") + "\n", "utf8");
 
       const containerName = `gmaps-${job.id}-${index}`;
+      job.currentContainer = containerName;
       const dockerArgs = [
         "run",
         "--rm",
@@ -522,7 +622,9 @@ async function runScrapeJob(job) {
           onStderr: lineSplitter(onScraperLine),
         });
       } catch (err) {
-        if (err.exitCode === OOM_EXIT_CODE && !stoppedIdle) {
+        if (job.stopRequested) {
+          // Stopped from the dashboard: docker stop makes gosom flush and exit.
+        } else if (err.exitCode === OOM_EXIT_CODE && !stoppedIdle) {
           ranOutOfMemory = true;
           appendLog(
             job,
@@ -546,8 +648,16 @@ async function runScrapeJob(job) {
       scheduleSave(job);
     }
 
+    job.currentContainer = null;
+    if (job.stopRequested) {
+      appendLog(job, `Stopped. Keeping the ${csvRowCount(resultsPath)} businesses found so far.`);
+    }
     if (!existsSync(resultsPath)) {
-      throw new Error("Scrape finished but results.csv was not created.");
+      throw new Error(
+        job.stopRequested
+          ? "Stopped before any businesses were found."
+          : "Scrape finished but results.csv was not created."
+      );
     }
     if (csvToObjects(resultsPath).length === 0) {
       throw new Error(
@@ -715,19 +825,56 @@ async function runTrendJob(trend) {
         "--resolution", trend.resolution,
         "--out-prefix", prefix,
       ],
-      { onStdout: lineSplitter(log), onStderr: lineSplitter(log) }
+      { onStdout: lineSplitter(log), onStderr: lineSplitter(log), timeoutMs: TREND_TIMEOUT_MS }
     );
     trend.result = readTrendResults(prefix);
     trend.status = "completed";
   } catch (err) {
     trend.status = "failed";
-    trend.error = /refusing|429/i.test(err.message)
-      ? "Google Trends is rate-limiting this server. Wait 10-15 minutes and try again, or use fewer terms."
-      : err.message;
+    trend.error = err.timedOut
+      ? "Google Trends took too long (over 20 minutes). Try again later or with fewer terms."
+      : /refusing|429/i.test(err.message)
+        ? "Google Trends is rate-limiting this server. Wait 10-15 minutes and try again, or use fewer terms."
+        : err.message;
   } finally {
     trend.finishedAt = new Date().toISOString();
     activeTrend = null;
     saveTrend(trend);
+  }
+}
+
+/**
+ * After a crash or reboot, work that was running can never finish: mark it
+ * failed so the dashboard doesn't wait on it forever, and remove scraper
+ * containers left behind (they would keep using memory).
+ */
+async function recoverInterruptedWork() {
+  const now = new Date().toISOString();
+  for (const job of listJobs()) {
+    if (!["queued", "scraping", "filtering"].includes(job.status)) continue;
+    job.status = "failed";
+    job.error = "Interrupted: the server restarted during this scan. Please run it again.";
+    job.finishedAt = job.finishedAt || now;
+    job.log = [...(job.log || []), { at: now, line: `ERROR: ${job.error}` }];
+    saveJob(job);
+  }
+  for (const id of readdirSync(TRENDS)) {
+    const trend = loadTrend(id);
+    if (!trend || !["queued", "running"].includes(trend.status)) continue;
+    trend.status = "failed";
+    trend.error = "Interrupted: the server restarted during this check. Please run it again.";
+    trend.finishedAt = trend.finishedAt || now;
+    saveTrend(trend);
+  }
+  try {
+    const { stdout } = await runCommand("docker", ["ps", "-aq", "--filter", "name=^gmaps-"]);
+    const ids = stdout.split(/\s+/).filter(Boolean);
+    if (ids.length) {
+      await runCommand("docker", ["rm", "-f", ...ids]);
+      console.log(`  Removed ${ids.length} leftover scraper container(s).`);
+    }
+  } catch {
+    /* docker unavailable: nothing to clean */
   }
 }
 
@@ -748,8 +895,17 @@ function serveStatic(req, res) {
   }
 
   const ext = extname(filePath);
-  res.writeHead(200, { "Content-Type": MIME[ext] || "application/octet-stream" });
-  res.end(readFileSync(filePath));
+  const body = readFileSync(filePath);
+  const etag = `"${createHash("sha1").update(body).digest("hex").slice(0, 16)}"`;
+  // no-cache = always revalidate, so a deploy shows up on the next load without
+  // a hard refresh; the ETag makes unchanged files a cheap 304.
+  const headers = { "Cache-Control": "no-cache", ETag: etag };
+  if (req.headers["if-none-match"] === etag) {
+    res.writeHead(304, headers);
+    return res.end();
+  }
+  res.writeHead(200, { ...headers, "Content-Type": MIME[ext] || "application/octet-stream" });
+  res.end(body);
 }
 
 function listJobs() {
@@ -783,15 +939,21 @@ const server = createServer(async (req, res) => {
     }
 
     if (req.method === "POST" && url.pathname === "/api/login") {
-      const body = await readBody(req);
-      const password = String(body.password || "");
       if (!ACCESS_PASSWORD) {
         return json(res, 200, { ok: true, authRequired: false });
       }
-      if (password !== ACCESS_PASSWORD) {
+      const ip = clientIp(req);
+      if (loginBlocked(ip)) {
+        return json(res, 429, { error: "Too many wrong passwords. Try again in 15 minutes." });
+      }
+      const body = await readBody(req);
+      const password = String(body.password || "");
+      if (!safeEqual(password, ACCESS_PASSWORD)) {
+        recordLoginFailure(ip);
         return json(res, 401, { error: "Wrong password." });
       }
-      return json(res, 200, { ok: true, token: ACCESS_PASSWORD });
+      loginFailures.delete(ip);
+      return json(res, 200, { ok: true, token: SESSION_TOKEN });
     }
 
     if (req.method === "GET" && url.pathname === "/api/jobs") {
@@ -814,16 +976,20 @@ const server = createServer(async (req, res) => {
 
     if (req.method === "GET" && url.pathname.startsWith("/api/jobs/")) {
       if (!requireAuth(req, res)) return;
-      const id = url.pathname.split("/")[3];
+      const id = routeId(url);
+      if (!id) return json(res, 404, { error: "Job not found" });
       // The running job lives in memory; disk writes are throttled.
       const job = activeJob?.id === id ? activeJob : loadJob(id);
       if (!job) return json(res, 404, { error: "Job not found" });
-      return json(res, 200, { job });
+      // The dashboard polls every 2s and shows the last 80 lines; don't send 500.
+      const { searches, ...rest } = job;
+      return json(res, 200, { job: { ...rest, log: (job.log || []).slice(-80) } });
     }
 
     if (req.method === "GET" && url.pathname.startsWith("/api/leads/")) {
       if (!requireAuth(req, res)) return;
-      const id = url.pathname.split("/")[3];
+      const id = routeId(url);
+      if (!id) return json(res, 404, { error: "Job not found" });
       const job = loadJob(id);
       if (!job) return json(res, 404, { error: "Job not found" });
       return json(res, 200, {
@@ -845,7 +1011,8 @@ const server = createServer(async (req, res) => {
 
     if (req.method === "GET" && url.pathname.startsWith("/api/trends/")) {
       if (!requireAuth(req, res)) return;
-      const id = url.pathname.split("/")[3];
+      const id = routeId(url);
+      if (!id) return json(res, 404, { error: "Not found" });
       const trend = activeTrend?.id === id ? activeTrend : loadTrend(id);
       if (!trend) return json(res, 404, { error: "Not found" });
       return json(res, 200, { trend });
@@ -868,6 +1035,9 @@ const server = createServer(async (req, res) => {
       if (terms.length > MAX_TREND_TERMS) {
         return json(res, 400, { error: `Use at most ${MAX_TREND_TERMS} terms per check.` });
       }
+      if (activeTrend) {
+        return json(res, 409, { error: "A trends check is already running.", id: activeTrend.id });
+      }
       const trend = {
         id: randomUUID().slice(0, 8),
         terms,
@@ -887,8 +1057,9 @@ const server = createServer(async (req, res) => {
 
     if (req.method === "GET" && url.pathname.startsWith("/api/market/")) {
       if (!requireAuth(req, res)) return;
-      const [, , , id, format] = url.pathname.split("/");
-      if (!loadJob(id)) return json(res, 404, { error: "Job not found" });
+      const id = routeId(url);
+      const format = url.pathname.split("/")[4];
+      if (!id || !loadJob(id)) return json(res, 404, { error: "Job not found" });
       const file = join(JOBS, id, format === "csv" ? "market.csv" : "market.json");
       if (!existsSync(file)) return json(res, 404, { error: "No market analysis for this scan" });
       if (format === "csv") {
@@ -903,8 +1074,8 @@ const server = createServer(async (req, res) => {
 
     if (req.method === "GET" && url.pathname.startsWith("/api/download/")) {
       if (!requireAuth(req, res)) return;
-      const id = url.pathname.split("/")[3];
-      if (!loadJob(id)) return json(res, 404, { error: "Job not found" });
+      const id = routeId(url);
+      if (!id || !loadJob(id)) return json(res, 404, { error: "Job not found" });
       const leadsPath = leadsFile(id);
       if (!existsSync(leadsPath)) return json(res, 404, { error: "No leads file" });
       res.writeHead(200, {
@@ -913,6 +1084,25 @@ const server = createServer(async (req, res) => {
       });
       res.end(readFileSync(leadsPath));
       return;
+    }
+
+    if (req.method === "POST" && /^\/api\/scrape\/[a-f0-9]{8}\/stop$/.test(url.pathname)) {
+      if (!requireAuth(req, res)) return;
+      const id = routeId(url);
+      if (!activeJob || activeJob.id !== id) {
+        return json(res, 409, { error: "That scan isn't running." });
+      }
+      if (activeJob.status !== "scraping") {
+        return json(res, 409, { error: "Almost done: the scan is already processing its results." });
+      }
+      if (!activeJob.stopRequested) {
+        activeJob.stopRequested = true;
+        appendLog(activeJob, "Stopping: finishing up and keeping what was found so far...");
+        if (activeJob.currentContainer) {
+          runCommand("docker", ["stop", activeJob.currentContainer]).catch(() => {});
+        }
+      }
+      return json(res, 202, { ok: true });
     }
 
     if (req.method === "POST" && url.pathname === "/api/scrape") {
@@ -947,6 +1137,10 @@ const server = createServer(async (req, res) => {
         });
       }
 
+      // Re-check: another request may have started a scan during the awaits above.
+      if (activeJob) {
+        return json(res, 409, { error: "A scrape is already running. Wait for it to finish.", jobId: activeJob.id });
+      }
       const job = {
         id: randomUUID().slice(0, 8),
         location,
@@ -984,11 +1178,14 @@ const server = createServer(async (req, res) => {
 
     json(res, 404, { error: "Not found" });
   } catch (err) {
-    json(res, 500, { error: err.message });
+    console.error(`[${req.method} ${url.pathname}]`, err);
+    const expected = /Body too large|Invalid JSON|City is required/.test(err.message);
+    json(res, expected ? 400 : 500, { error: expected ? err.message : "Something went wrong on the server." });
   }
 });
 
 checkTrendsAvailable();
+await recoverInterruptedWork();
 
 server.listen(PORT, () => {
   console.log("");

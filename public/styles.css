@@ -66,6 +66,17 @@ body {
   border-color: rgba(109, 94, 252, 0.55);
 }
 
+.progress-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.btn-small {
+  padding: 8px 14px;
+  font-size: 13px;
+}
+
 .sub-head {
   margin: 22px 0 10px;
   font-size: 1.05rem;
