@@ -66,6 +66,22 @@ body {
   border-color: rgba(109, 94, 252, 0.55);
 }
 
+.download-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.thumb {
+  float: left;
+  width: 44px;
+  height: 44px;
+  margin: 0 10px 4px 0;
+  border-radius: 10px;
+  object-fit: cover;
+  background: var(--panel-2);
+}
+
 .progress-actions {
   display: flex;
   align-items: center;

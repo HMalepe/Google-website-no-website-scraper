@@ -47,6 +47,7 @@ const OUT_HEADERS = [
   "google_maps_link",
   "review_rating",
   "review_count",
+  "thumbnail",
 ];
 
 const WEBSITE_KEYS = ["website", "web_site", "site", "url", "website_url"];
@@ -352,6 +353,7 @@ function buildLead(record, keys, cls) {
     google_maps_link: pick(record, LINK_KEYS),
     review_rating: pick(record, RATING_KEYS),
     review_count: pick(record, REVIEW_COUNT_KEYS),
+    thumbnail: pick(record, ["thumbnail"]),
   };
 }
 

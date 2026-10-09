@@ -511,7 +511,11 @@ async function loadLeads(jobId) {
           )}${lead.score ? ` · ${escapeHtml(lead.score)}` : ""}</span>
           ${lead.reasons ? `<span class="lead-reasons">${escapeHtml(lead.reasons)}</span>` : ""}
         </div></td>
-        <td data-label="Business"><div><strong>${
+        <td data-label="Business"><div>${
+          photoUrl(lead.thumbnail)
+            ? `<img class="thumb" src="${escapeHtml(photoUrl(lead.thumbnail))}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">`
+            : ""
+        }<strong>${
           safeUrl(lead.google_maps_link)
             ? `<a href="${escapeHtml(safeUrl(lead.google_maps_link))}" target="_blank" rel="noopener">${escapeHtml(
                 lead.business_name || "—"
@@ -545,20 +549,17 @@ async function loadLeads(jobId) {
     )
     .join("");
 
-  $("downloadBtn").onclick = () => {
-    const url = `/api/download/${jobId}`;
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "";
-    if (authToken) {
-      fetch(url, { headers: authHeaders() })
-        .then((r) => r.blob())
-        .then((blob) => {
-          a.href = URL.createObjectURL(blob);
-          a.click();
-        });
-    } else {
-      a.click();
+  const slug = String($("resultCity").textContent || "scan").replace(/[^a-z0-9]+/gi, "-").toLowerCase();
+  $("downloadBtn").onclick = () => downloadFile(`/api/download/${jobId}`, `leads-${slug}.csv`);
+  $("pdfBtn").onclick = async () => {
+    const btn = $("pdfBtn");
+    btn.disabled = true;
+    btn.textContent = "Preparing PDF…";
+    try {
+      await downloadFile(`/api/report/${jobId}/pdf`, `leads-${slug}.pdf`);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Download PDF";
     }
   };
 }
@@ -617,15 +618,35 @@ async function loadMarket(jobId) {
   $("marketDownloadBtn").onclick = () => downloadFile(`/api/market/${jobId}/csv`, `market-${jobId}.csv`);
 }
 
-function downloadFile(url, filename) {
-  fetch(url, { headers: authHeaders() })
-    .then((r) => r.blob())
-    .then((blob) => {
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = filename;
-      a.click();
-    });
+async function downloadFile(url, filename) {
+  try {
+    const res = await fetch(url, { headers: authHeaders() });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      alert(data.error || "Download failed. Please try again.");
+      return;
+    }
+    const href = URL.createObjectURL(await res.blob());
+    const a = document.createElement("a");
+    a.href = href;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(href), 60_000);
+  } catch {
+    alert("Download failed: can't reach the server.");
+  }
+}
+
+/** Business photo from Google's image CDN (the only source scraped data may load from). */
+function photoUrl(value) {
+  const url = safeUrl(value);
+  try {
+    return url && /(^|\.)(googleusercontent\.com|ggpht\.com)$/i.test(new URL(url).hostname) ? url : "";
+  } catch {
+    return "";
+  }
 }
 
 // ---------------------------------------------------------------- Trends

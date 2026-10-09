@@ -11,6 +11,11 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
     Write-Warning "Docker not found. Install Docker Desktop before scraping."
 }
 
+if (-not (Test-Path (Join-Path $Root "node_modules"))) {
+    Write-Host "Installing dashboard dependencies (first run)..."
+    npm install --omit=dev
+}
+
 $port = if ($env:PORT) { $env:PORT } else { 3847 }
 $url = "http://localhost:$port"
 

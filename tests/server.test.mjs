@@ -140,6 +140,19 @@ test("full scan: one at a time, leads, WhatsApp only for mobiles, market gaps", 
   assert.ok(cat.complaints.themes.some((t) => t.theme === "staff attitude"));
 });
 
+test("PDF report downloads for a finished scan", async () => {
+  const { data } = await api("/api/jobs");
+  const done = data.jobs.find((j) => j.status === "completed");
+  assert.ok(done, "needs the scan from the previous test");
+  const res = await fetch(`${BASE}/api/report/${done.id}/pdf`, { headers: { Authorization: `Bearer ${token}` } });
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("content-type"), "application/pdf");
+  assert.match(res.headers.get("content-disposition"), /leads-johannesburg-.*\.pdf/);
+  const bytes = Buffer.from(await res.arrayBuffer());
+  assert.equal(bytes.subarray(0, 5).toString(), "%PDF-");
+  assert.equal((await fetch(`${BASE}/api/report/${done.id}/pdf`)).status, 401, "needs login");
+});
+
 test("trends reports unavailable cleanly when Python isn't installed", async () => {
   const r = await api("/api/trends");
   assert.equal(r.status, 200);
