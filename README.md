@@ -24,6 +24,40 @@ Ties are broken by review count, so busy businesses come first.
 Downloads: `leads.csv` (all lead types, ranked). The filter also writes
 `no-website-leads.csv` (no website + social only).
 
+## Market research tools (`tools/`)
+
+Standalone Python scripts for deciding **where** and **what** to sell. They don't use the dashboard.
+
+```powershell
+pip install -r tools/requirements.txt
+```
+
+**`tools/market.py`: suburb gaps + competitor complaints** (needs a Google Places API key)
+
+```powershell
+$env:GOOGLE_PLACES_API_KEY="your-key"
+python tools/market.py --suburbs "Randburg,Sandton,Fourways" --city Johannesburg --category "hair salon"
+python tools/market.py --suburbs "Randburg,Sandton" --city Johannesburg --category "nail salon" --reviews
+```
+
+It writes `market_suburbs.csv` (suburbs ranked by opportunity: busy market, few strong competitors,
+Sunday/evening/website gaps) and `market_salons.csv` (every competitor). With `--reviews` it also
+writes `market_complaints.csv` (what customers hate: waiting, booking, price, quality, hygiene…).
+`--reviews` uses a pricier API tier, and Google returns at most 5 reviews per place, so the
+complaint counts are a sample.
+
+**`tools/trends.py`: what is rising, when demand peaks, where** (free, no key)
+
+```powershell
+python tools/trends.py
+python tools/trends.py --terms "knotless braids,gel nails,lashes,barber" --geo ZA-GP --timeframe "today 5-y"
+```
+
+It writes `trends_summary.csv` (momentum, RISING/FALLING, peak and low month), plus
+`trends_over_time.csv`, `trends_regions.csv` and `trends_rising.csv`. It uses the unofficial
+`pytrends` library: Google rate-limits it (the script backs off and retries) and it can break
+when Google changes things.
+
 ## Go live (free or cheap VPS)
 
 **Start here:** [deploy/VPS-SETUP.md](deploy/VPS-SETUP.md)
