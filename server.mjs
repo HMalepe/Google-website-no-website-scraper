@@ -7,6 +7,8 @@ import {
   mkdirSync,
   readdirSync,
   statSync,
+  appendFileSync,
+  unlinkSync,
 } from "node:fs";
 import { dirname, join, resolve, extname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -59,6 +61,8 @@ const DEFAULT_CONCURRENCY = Math.max(
   Math.min(4, cpus().length, Math.floor(TOTAL_MEMORY_MB / 1536))
 );
 const SMALL_SERVER = TOTAL_MEMORY_MB < 3000;
+// Searches per fresh scraper container (see runScrapeJob).
+const SEARCHES_PER_SCRAPER = SMALL_SERVER ? 1 : 10;
 const OOM_EXIT_CODE = 137;
 const DEFAULT_DEPTH = 10;
 const MAX_DEPTH = 30;
@@ -159,6 +163,28 @@ function csvToObjects(path) {
     });
     return obj;
   });
+}
+
+function csvRowCount(path) {
+  return existsSync(path) ? csvToObjects(path).length : 0;
+}
+
+/** Append one batch's CSV to the combined results (header only once), then delete it. */
+function appendCsvPart(targetPath, partPath) {
+  if (!existsSync(partPath)) return;
+  const text = readFileSync(partPath, "utf8").replace(/^\uFEFF/, "");
+  const firstBreak = text.indexOf("\n");
+  if (text.trim() && firstBreak !== -1) {
+    if (!existsSync(targetPath)) {
+      writeFileSync(targetPath, text, "utf8");
+    } else {
+      const body = text.slice(firstBreak + 1);
+      const existing = readFileSync(targetPath, "utf8");
+      const sep = existing.endsWith("\n") ? "" : "\n";
+      if (body.trim()) appendFileSync(targetPath, sep + body, "utf8");
+    }
+  }
+  unlinkSync(partPath);
 }
 
 function loadJob(id) {
@@ -391,76 +417,114 @@ async function runScrapeJob(job) {
       (job.auditSites ? ", auditing websites" : "")
   );
 
-  const containerName = `gmaps-${job.id}`;
-  const dockerArgs = [
-    "run",
-    "--rm",
-    "--name",
-    containerName,
-    "--memory",
-    `${SCRAPER_MEMORY_MB}m`,
-    "--memory-swap",
-    `${SCRAPER_MEMORY_MB}m`,
-    "-v",
-    "gmaps-playwright-cache:/opt",
-    "-v",
-    `${queriesPath}:/queries.txt:ro`,
-    "-v",
-    `${jobDir}:/out`,
-    "gosom/google-maps-scraper",
-    "-input",
-    "/queries.txt",
-    "-results",
-    "/out/results.csv",
-    "-depth",
-    String(job.depth),
-    "-c",
-    String(job.concurrency),
-  ];
-  // Email crawling visits each listing's website: only worth it when sites become leads.
-  if (job.auditSites) dockerArgs.push("-email");
+  // Searches run in batches, each in a fresh scraper container. Headless
+  // Chrome's memory only grows during a run, so restarting it between
+  // batches hands everything back to the OS, and a batch that crashes
+  // (e.g. out of memory) costs only its own searches, not the whole scan.
+  const batches = [];
+  for (let i = 0; i < job.queries.length; i += SEARCHES_PER_SCRAPER) {
+    batches.push(job.queries.slice(i, i + SEARCHES_PER_SCRAPER));
+  }
+  const multiBatch = batches.length > 1;
+  if (multiBatch) {
+    appendLog(
+      job,
+      `Running ${batches.length} batches of up to ${SEARCHES_PER_SCRAPER} search${
+        SEARCHES_PER_SCRAPER === 1 ? "" : "es"
+      }, with a fresh scraper (and freed memory) for each.`
+    );
+  }
 
-  let stoppedIdle = false;
   let ranOutOfMemory = false;
-  const monitor = setInterval(() => {
-    const p = job.progress;
-    // Businesses written so far: covers scraper versions whose logs we can't count.
-    if (existsSync(resultsPath)) {
-      const rows = csvToObjects(resultsPath).length;
-      if (rows > p.businessesFound) {
-        p.businessesFound = rows;
-        p.lastActivityAt = Date.now();
-        scheduleSave(job);
-      }
-    }
-    const lastActivity = p.lastActivityAt || Date.parse(job.startedAt);
-    if (!stoppedIdle && Date.now() - lastActivity > SCRAPER_IDLE_LIMIT_MS) {
-      stoppedIdle = true;
-      appendLog(
-        job,
-        `No progress for ${SCRAPER_IDLE_LIMIT_MS / 60_000} minutes. Stopping the scraper and keeping what was found.`
-      );
-      // SIGTERM: gosom flushes results.csv and exits cleanly.
-      runCommand("docker", ["stop", containerName]).catch(() => {});
-    }
-  }, 5000);
+  let searchesBefore = 0;
+  const onScraperLine = (line) => handleScraperLine(job, line);
 
   try {
-    const onScraperLine = (line) => handleScraperLine(job, line);
-    try {
-      await runCommand("docker", dockerArgs, {
-        onStdout: lineSplitter(onScraperLine),
-        onStderr: lineSplitter(onScraperLine),
-      });
-    } catch (err) {
-      if (err.exitCode === OOM_EXIT_CODE && !stoppedIdle) {
-        ranOutOfMemory = true;
-        appendLog(job, "The scraper ran out of memory and was stopped. Keeping what it found.");
-      } else if (!stoppedIdle) {
-        throw err;
+    for (const [index, batch] of batches.entries()) {
+      const batchQueries = join(jobDir, `queries-${index}.txt`);
+      const batchResults = join(jobDir, `results-${index}.csv`);
+      writeFileSync(batchQueries, batch.join("\n") + "\n", "utf8");
+
+      const containerName = `gmaps-${job.id}-${index}`;
+      const dockerArgs = [
+        "run",
+        "--rm",
+        "--name",
+        containerName,
+        "--memory",
+        `${SCRAPER_MEMORY_MB}m`,
+        "--memory-swap",
+        `${SCRAPER_MEMORY_MB}m`,
+        "-v",
+        "gmaps-playwright-cache:/opt",
+        "-v",
+        `${batchQueries}:/queries.txt:ro`,
+        "-v",
+        `${jobDir}:/out`,
+        "gosom/google-maps-scraper",
+        "-input",
+        "/queries.txt",
+        "-results",
+        `/out/results-${index}.csv`,
+        "-depth",
+        String(job.depth),
+        "-c",
+        String(job.concurrency),
+      ];
+      // Email crawling visits each listing's website: only worth it when sites become leads.
+      if (job.auditSites) dockerArgs.push("-email");
+
+      let stoppedIdle = false;
+      const batchStart = Date.now();
+      const monitor = setInterval(() => {
+        const p = job.progress;
+        // Businesses written so far: covers scraper versions whose logs we can't count.
+        const rows = csvRowCount(resultsPath) + csvRowCount(batchResults);
+        if (rows > p.businessesFound) {
+          p.businessesFound = rows;
+          p.lastActivityAt = Date.now();
+          scheduleSave(job);
+        }
+        const lastActivity = Math.max(p.lastActivityAt || 0, batchStart);
+        if (!stoppedIdle && Date.now() - lastActivity > SCRAPER_IDLE_LIMIT_MS) {
+          stoppedIdle = true;
+          appendLog(
+            job,
+            `No progress for ${SCRAPER_IDLE_LIMIT_MS / 60_000} minutes. Stopping this scraper and keeping what it found.`
+          );
+          // SIGTERM: gosom flushes its CSV and exits cleanly.
+          runCommand("docker", ["stop", containerName]).catch(() => {});
+        }
+      }, 5000);
+
+      try {
+        await runCommand("docker", dockerArgs, {
+          onStdout: lineSplitter(onScraperLine),
+          onStderr: lineSplitter(onScraperLine),
+        });
+      } catch (err) {
+        if (err.exitCode === OOM_EXIT_CODE && !stoppedIdle) {
+          ranOutOfMemory = true;
+          appendLog(
+            job,
+            multiBatch
+              ? `Batch ${index + 1}/${batches.length} ran out of memory. Keeping what it found and moving on.`
+              : "The scraper ran out of memory and was stopped. Keeping what it found."
+          );
+        } else if (!stoppedIdle) {
+          if (!multiBatch) throw err;
+          appendLog(job, `Batch ${index + 1}/${batches.length} failed (${err.message}). Moving on.`);
+        }
+      } finally {
+        clearInterval(monitor);
       }
-    } finally {
-      clearInterval(monitor);
+
+      appendCsvPart(resultsPath, batchResults);
+      // Searches that died without logging still count as done for the bar.
+      searchesBefore += batch.length;
+      job.progress.searchesDone = Math.max(job.progress.searchesDone, searchesBefore);
+      job.progress.businessesFound = csvRowCount(resultsPath);
+      scheduleSave(job);
     }
 
     if (!existsSync(resultsPath)) {
