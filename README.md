@@ -24,39 +24,33 @@ Ties are broken by review count, so busy businesses come first.
 Downloads: `leads.csv` (all lead types, ranked). The filter also writes
 `no-website-leads.csv` (no website + social only).
 
-## Market research tools (`tools/`)
+## Market insights (free, no API keys)
 
-Standalone Python scripts for deciding **where** and **what** to sell. They don't use the dashboard.
+**Market gaps (every scan).** After each scan, the dashboard analyses the businesses it found.
+For each business type and suburb it shows:
 
-```powershell
-pip install -r tools/requirements.txt
-```
+- competitors, and how many are strong (4.5★ or more with 20+ reviews)
+- customer activity (total reviews)
+- the percentage with no website, open on Sundays and open in the evening
+- an opportunity score, where busy areas with service gaps rank highest
+- a plain-English angle, e.g. "busy but few strong players; evening hours are a gap"
 
-**`tools/market.py`: suburb gaps + competitor complaints** (needs a Google Places API key)
+It also lists **what customers complain about**, mined from low-star reviews: waiting, booking,
+price, quality, hygiene, staff attitude and so on. You can download it as a CSV (`market.csv`).
+The scraper keeps about 8 reviews per business, so the complaints are a sample.
 
-```powershell
-$env:GOOGLE_PLACES_API_KEY="your-key"
-python tools/market.py --suburbs "Randburg,Sandton,Fourways" --city Johannesburg --category "hair salon"
-python tools/market.py --suburbs "Randburg,Sandton" --city Johannesburg --category "nail salon" --reviews
-```
+CLI: `node scripts/market-insights.mjs output/results.csv output`
 
-It writes `market_suburbs.csv` (suburbs ranked by opportunity: busy market, few strong competitors,
-Sunday/evening/website gaps) and `market_salons.csv` (every competitor). With `--reviews` it also
-writes `market_complaints.csv` (what customers hate: waiting, booking, price, quality, hygiene…).
-`--reviews` uses a pricier API tier, and Google returns at most 5 reviews per place, so the
-complaint counts are a sample.
+**Google Trends tab.** Enter up to 10 search terms (e.g. `knotless braids, gel nails, lashes`).
+For South Africa it shows:
 
-**`tools/trends.py`: what is rising, when demand peaks, where** (free, no key)
+- which terms are **RISING** or **FALLING** right now (last 4 weeks vs the 8 before)
+- the peak and low months
+- the top provinces or cities
+- breakout related searches
 
-```powershell
-python tools/trends.py
-python tools/trends.py --terms "knotless braids,gel nails,lashes,barber" --geo ZA-GP --timeframe "today 5-y"
-```
-
-It writes `trends_summary.csv` (momentum, RISING/FALLING, peak and low month), plus
-`trends_over_time.csv`, `trends_regions.csv` and `trends_rising.csv`. It uses the unofficial
-`pytrends` library: Google rate-limits it (the script backs off and retries) and it can break
-when Google changes things.
+It uses the unofficial `pytrends` library. Google rate-limits it, so if a check fails, wait 10–15
+minutes and try again. CLI: `pip install -r tools/requirements.txt`, then `python tools/trends.py`.
 
 ## Go live (free or cheap VPS)
 
