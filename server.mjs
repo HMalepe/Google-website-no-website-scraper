@@ -70,6 +70,15 @@ const MAX_QUERIES = 400;
 
 let activeJob = null;
 
+// Google Trends (free) via tools/trends.py.
+const TRENDS = join(DATA, "trends");
+const TRENDS_PYTHON = process.env.TRENDS_PYTHON || "python3";
+const TRENDS_SCRIPT = join(ROOT, "tools", "trends.py");
+const TREND_TIMEFRAMES = ["today 3-m", "today 12-m", "today 5-y"];
+const MAX_TREND_TERMS = 10;
+let activeTrend = null;
+let trendsAvailable = null;
+
 const MIME = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -80,6 +89,7 @@ const MIME = {
 };
 
 mkdirSync(JOBS, { recursive: true });
+mkdirSync(TRENDS, { recursive: true });
 
 function json(res, status, body) {
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
@@ -303,17 +313,23 @@ function cleanList(values) {
   return [...new Set((values || []).map((v) => String(v).trim()).filter(Boolean))];
 }
 
-/** Every category in every suburb (or just the city), e.g. "plumbers in Randburg, Johannesburg". */
-function buildQueries(location, categories, suburbs) {
+/**
+ * Every category in every suburb (or just the city), e.g. "plumbers in Randburg, Johannesburg".
+ * Each search gets an id that the scraper copies into every result row (input_id),
+ * so the market analysis knows which area and business type a row came from.
+ */
+function buildSearches(location, categories, suburbs) {
   const loc = String(location || "").trim();
   if (!loc) throw new Error("City is required.");
 
   const cats = cleanList(categories);
   const list = cats.length > 0 ? cats : DEFAULT_SCAN_CATEGORIES;
-  const areas = cleanList(suburbs).map((s) => `${s}, ${loc}`);
-  if (areas.length === 0) areas.push(loc);
+  const subs = cleanList(suburbs);
+  const areas = subs.length ? subs.map((s) => ({ area: s, place: `${s}, ${loc}` })) : [{ area: loc, place: loc }];
 
-  return areas.flatMap((area) => list.map((cat) => `${cat} in ${area}`));
+  return areas.flatMap(({ area, place }) =>
+    list.map((category) => ({ query: `${category} in ${place}`, area, category }))
+  ).map((search, i) => ({ id: `q${i}`, ...search }));
 }
 
 function clampInt(value, min, max, fallback) {
@@ -421,9 +437,11 @@ async function runScrapeJob(job) {
   // Chrome's memory only grows during a run, so restarting it between
   // batches hands everything back to the OS, and a batch that crashes
   // (e.g. out of memory) costs only its own searches, not the whole scan.
+  const searches = job.searches || job.queries.map((query, i) => ({ id: `q${i}`, query }));
+  writeFileSync(join(jobDir, "searches.json"), JSON.stringify(searches, null, 2), "utf8");
   const batches = [];
-  for (let i = 0; i < job.queries.length; i += SEARCHES_PER_SCRAPER) {
-    batches.push(job.queries.slice(i, i + SEARCHES_PER_SCRAPER));
+  for (let i = 0; i < searches.length; i += SEARCHES_PER_SCRAPER) {
+    batches.push(searches.slice(i, i + SEARCHES_PER_SCRAPER));
   }
   const multiBatch = batches.length > 1;
   if (multiBatch) {
@@ -443,7 +461,8 @@ async function runScrapeJob(job) {
     for (const [index, batch] of batches.entries()) {
       const batchQueries = join(jobDir, `queries-${index}.txt`);
       const batchResults = join(jobDir, `results-${index}.csv`);
-      writeFileSync(batchQueries, batch.join("\n") + "\n", "utf8");
+      // "query #!# id": gosom searches the query and writes the id as input_id.
+      writeFileSync(batchQueries, batch.map((b) => `${b.query} #!# ${b.id}`).join("\n") + "\n", "utf8");
 
       const containerName = `gmaps-${job.id}-${index}`;
       const dockerArgs = [
@@ -555,6 +574,19 @@ async function runScrapeJob(job) {
       onStdout: lineSplitter((line) => handleFilterLine(job, line)),
     });
 
+    // Free market-gap analysis from the same results; never fails the scan.
+    try {
+      await runCommand("node", [
+        join(ROOT, "scripts", "market-insights.mjs"),
+        resultsPath,
+        jobDir,
+        join(jobDir, "searches.json"),
+      ]);
+      job.hasMarket = existsSync(join(jobDir, "market.json"));
+    } catch (err) {
+      appendLog(job, `Market analysis skipped: ${err.message}`);
+    }
+
     const summaryPath = join(jobDir, "summary.json");
     job.summary = existsSync(summaryPath)
       ? JSON.parse(readFileSync(summaryPath, "utf8"))
@@ -574,6 +606,128 @@ async function runScrapeJob(job) {
     clearTimeout(saveTimers.get(job.id));
     saveTimers.delete(job.id);
     saveJob(job);
+  }
+}
+
+async function checkTrendsAvailable() {
+  try {
+    await runCommand(TRENDS_PYTHON, ["-c", "import pytrends, pandas"]);
+    trendsAvailable = existsSync(TRENDS_SCRIPT);
+  } catch {
+    trendsAvailable = false;
+  }
+  return trendsAvailable;
+}
+
+function loadTrend(id) {
+  const file = join(TRENDS, id, "trend.json");
+  return existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : null;
+}
+
+function saveTrend(trend) {
+  mkdirSync(join(TRENDS, trend.id), { recursive: true });
+  writeFileSync(join(TRENDS, trend.id, "trend.json"), JSON.stringify(trend, null, 2), "utf8");
+}
+
+function listTrends() {
+  return readdirSync(TRENDS)
+    .map((id) => loadTrend(id))
+    .filter(Boolean)
+    .sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""))
+    .slice(0, 10)
+    .map(({ id, terms, timeframe, resolution, status, createdAt }) => ({
+      id, terms, timeframe, resolution, status, createdAt,
+    }));
+}
+
+function toNumber(value) {
+  const n = Number(value);
+  return value === "" || !Number.isFinite(n) ? null : n;
+}
+
+/** Collect trends.py's CSV outputs into one JSON object for the dashboard. */
+function readTrendResults(prefix) {
+  const summary = csvToObjects(`${prefix}_summary.csv`).map((r) => ({
+    term: r.term,
+    avgInterest: toNumber(r.avg_interest),
+    latest: toNumber(r.latest_4wk_avg),
+    momentumPct: toNumber(r.momentum_pct),
+    vsAveragePct: toNumber(r.vs_average_pct),
+    direction: r.direction,
+    peakWeek: r.peak_week,
+    peakMonth: r.peak_month,
+    lowMonth: r.low_month,
+  }));
+
+  const overTime = csvToObjects(`${prefix}_over_time.csv`);
+  const series = {};
+  for (const term of summary.map((r) => r.term)) {
+    series[term] = overTime.map((row) => toNumber(row[term]) ?? 0);
+  }
+
+  const regionRows = csvToObjects(`${prefix}_regions.csv`);
+  const topRegions = {};
+  for (const term of summary.map((r) => r.term)) {
+    topRegions[term] = regionRows
+      .map((row) => ({ region: row.region || row.geoName || "", value: toNumber(row[term]) ?? 0 }))
+      .filter((r) => r.region && r.value > 0)
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 3);
+  }
+
+  const rising = csvToObjects(`${prefix}_rising.csv`).map((r) => ({
+    term: r.term,
+    query: r.rising_query,
+    growth: r.growth,
+  }));
+
+  return {
+    summary,
+    dates: overTime.map((row) => row.date),
+    series,
+    topRegions,
+    rising,
+  };
+}
+
+async function runTrendJob(trend) {
+  const dir = join(TRENDS, trend.id);
+  const prefix = join(dir, "trends");
+  trend.status = "running";
+  trend.startedAt = new Date().toISOString();
+  saveTrend(trend);
+
+  const log = (line) => {
+    if (!line.startsWith("[")) return; // skip the script's printed tables
+    trend.log.push(line);
+    if (trend.log.length > 100) trend.log = trend.log.slice(-100);
+    saveTrend(trend);
+  };
+
+  try {
+    await runCommand(
+      TRENDS_PYTHON,
+      [
+        TRENDS_SCRIPT,
+        "--terms", trend.terms.join(","),
+        "--geo", "ZA",
+        "--timeframe", trend.timeframe,
+        "--resolution", trend.resolution,
+        "--out-prefix", prefix,
+      ],
+      { onStdout: lineSplitter(log), onStderr: lineSplitter(log) }
+    );
+    trend.result = readTrendResults(prefix);
+    trend.status = "completed";
+  } catch (err) {
+    trend.status = "failed";
+    trend.error = /refusing|429/i.test(err.message)
+      ? "Google Trends is rate-limiting this server. Wait 10-15 minutes and try again, or use fewer terms."
+      : err.message;
+  } finally {
+    trend.finishedAt = new Date().toISOString();
+    activeTrend = null;
+    saveTrend(trend);
   }
 }
 
@@ -621,6 +775,7 @@ const server = createServer(async (req, res) => {
         publicUrl: PUBLIC_URL || null,
         authRequired: Boolean(ACCESS_PASSWORD),
         memoryMb: TOTAL_MEMORY_MB,
+        trends: trendsAvailable,
         smallServer: SMALL_SERVER,
         authenticated: authed,
         activeJob: activeJob?.id ?? null,
@@ -678,6 +833,74 @@ const server = createServer(async (req, res) => {
       });
     }
 
+    if (req.method === "GET" && url.pathname === "/api/trends") {
+      if (!requireAuth(req, res)) return;
+      if (trendsAvailable === null) await checkTrendsAvailable();
+      return json(res, 200, {
+        available: trendsAvailable,
+        active: activeTrend?.id ?? null,
+        trends: listTrends(),
+      });
+    }
+
+    if (req.method === "GET" && url.pathname.startsWith("/api/trends/")) {
+      if (!requireAuth(req, res)) return;
+      const id = url.pathname.split("/")[3];
+      const trend = activeTrend?.id === id ? activeTrend : loadTrend(id);
+      if (!trend) return json(res, 404, { error: "Not found" });
+      return json(res, 200, { trend });
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/trends") {
+      if (!requireAuth(req, res)) return;
+      if (activeTrend) {
+        return json(res, 409, { error: "A trends check is already running.", id: activeTrend.id });
+      }
+      if (!(await checkTrendsAvailable())) {
+        return json(res, 503, {
+          error: "Trends isn't installed on this server yet (needs Python + pytrends). It installs with the next update.",
+        });
+      }
+      const body = await readBody(req);
+      const rawTerms = Array.isArray(body.terms) ? body.terms : String(body.terms || "").split(/[,\n]/);
+      const terms = cleanList(rawTerms).map((t) => t.slice(0, 60));
+      if (!terms.length) return json(res, 400, { error: "Add at least one search term." });
+      if (terms.length > MAX_TREND_TERMS) {
+        return json(res, 400, { error: `Use at most ${MAX_TREND_TERMS} terms per check.` });
+      }
+      const trend = {
+        id: randomUUID().slice(0, 8),
+        terms,
+        timeframe: TREND_TIMEFRAMES.includes(body.timeframe) ? body.timeframe : "today 12-m",
+        resolution: body.resolution === "CITY" ? "CITY" : "REGION",
+        status: "queued",
+        createdAt: new Date().toISOString(),
+        log: [],
+        result: null,
+        error: null,
+      };
+      saveTrend(trend);
+      activeTrend = trend;
+      runTrendJob(trend);
+      return json(res, 202, { trend });
+    }
+
+    if (req.method === "GET" && url.pathname.startsWith("/api/market/")) {
+      if (!requireAuth(req, res)) return;
+      const [, , , id, format] = url.pathname.split("/");
+      if (!loadJob(id)) return json(res, 404, { error: "Job not found" });
+      const file = join(JOBS, id, format === "csv" ? "market.csv" : "market.json");
+      if (!existsSync(file)) return json(res, 404, { error: "No market analysis for this scan" });
+      if (format === "csv") {
+        res.writeHead(200, {
+          "Content-Type": "text/csv; charset=utf-8",
+          "Content-Disposition": `attachment; filename="market-${id}.csv"`,
+        });
+        return res.end(readFileSync(file));
+      }
+      return json(res, 200, JSON.parse(readFileSync(file, "utf8")));
+    }
+
     if (req.method === "GET" && url.pathname.startsWith("/api/download/")) {
       if (!requireAuth(req, res)) return;
       const id = url.pathname.split("/")[3];
@@ -716,7 +939,8 @@ const server = createServer(async (req, res) => {
       }
       const categories = Array.isArray(body.categories) ? body.categories : [];
       const suburbs = Array.isArray(body.suburbs) ? cleanList(body.suburbs) : [];
-      const queries = buildQueries(location, categories, suburbs);
+      const searches = buildSearches(location, categories, suburbs);
+      const queries = searches.map((search) => search.query);
       if (queries.length > MAX_QUERIES) {
         return json(res, 400, {
           error: `That is ${queries.length} searches (max ${MAX_QUERIES}). Use fewer suburbs or business types.`,
@@ -729,6 +953,7 @@ const server = createServer(async (req, res) => {
         categories,
         suburbs,
         queries,
+        searches,
         // Deep scrolling multiplies browser memory; keep tiny servers shallow.
         depth: Math.min(
           clampInt(body.depth, 1, MAX_DEPTH, DEFAULT_DEPTH),
@@ -762,6 +987,8 @@ const server = createServer(async (req, res) => {
     json(res, 500, { error: err.message });
   }
 });
+
+checkTrendsAvailable();
 
 server.listen(PORT, () => {
   console.log("");

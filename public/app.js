@@ -180,6 +180,13 @@ async function init() {
   showApp();
   updateEngineStatus(data);
   renderRecent(jobs);
+  let view = "leadsView";
+  try {
+    view = localStorage.getItem("webscrape_view") || view;
+  } catch {
+    /* ignore */
+  }
+  if (view === "trendsView") showView(view);
 
   // Reopen the running scan, or the latest one, so a reload never loses results.
   const resumeId = data.activeJob || currentJobId || jobs[0]?.id;
@@ -191,6 +198,7 @@ function openJob(id) {
   leadsShownFor = null;
   $("resultsPanel").hidden = true;
   $("stats").hidden = true;
+  $("marketPanel").hidden = true;
   startPolling();
 }
 
@@ -249,6 +257,7 @@ function catchUp() {
   }
   refreshHealth();
   if (currentJobId) pollJob();
+  if (trendId && !$("trendsView").hidden) pollTrend();
 }
 
 function setJobStatus(status) {
@@ -450,6 +459,7 @@ async function pollJobOnce() {
     leadsShownFor = jobId;
     $("resultCity").textContent = job.location;
     await loadLeads(jobId);
+    await loadMarket(jobId);
   }
 }
 
@@ -542,6 +552,214 @@ async function loadLeads(jobId) {
   };
 }
 
+// ---------------------------------------------------------------- Market gaps
+
+function pctCell(value) {
+  return value === null || value === undefined ? "—" : `${value}%`;
+}
+
+async function loadMarket(jobId) {
+  const { res, data } = await api(`/api/market/${jobId}`);
+  if (!res.ok || !data.categories?.length) {
+    $("marketPanel").hidden = true;
+    return;
+  }
+  $("marketPanel").hidden = false;
+  $("marketBody").innerHTML = data.categories
+    .map((cat) => {
+      const rows = cat.areas
+        .map(
+          (a) => `<tr>
+            <td data-label="Area"><div><strong>${escapeHtml(a.area)}</strong></div></td>
+            <td data-label="Competitors"><div>${a.competitors} <span class="muted-inline">(${a.strong} strong)</span></div></td>
+            <td data-label="Avg rating"><div>${a.avgRating ?? "—"}</div></td>
+            <td data-label="Reviews"><div>${a.totalReviews}</div></td>
+            <td data-label="No website"><div>${pctCell(a.pctNoWebsite)}</div></td>
+            <td data-label="Open Sun"><div>${pctCell(a.pctOpenSunday)}</div></td>
+            <td data-label="Open late"><div>${pctCell(a.pctOpenLate)}</div></td>
+            <td data-label="Score"><div><strong>${a.opportunity}</strong></div></td>
+            <td data-label="Angle"><div class="angle">${escapeHtml(a.angle)}</div></td>
+          </tr>`
+        )
+        .join("");
+      const complaints = cat.complaints?.themes?.length
+        ? `<div class="complaints">
+            <span class="muted-inline">Customers complain about (${cat.complaints.sample} low-star reviews):</span>
+            ${cat.complaints.themes
+              .map(
+                (t) =>
+                  `<span class="complaint" title="${escapeHtml(t.examples.join("  |  "))}">${escapeHtml(
+                    t.theme
+                  )} · ${t.share}%</span>`
+              )
+              .join("")}
+          </div>`
+        : "";
+      return `<h3 class="sub-head">${escapeHtml(cat.category)}</h3>
+        <div class="table-wrap"><table class="market-table">
+          <thead><tr><th>Area</th><th>Competitors</th><th>Avg ★</th><th>Reviews</th><th>No website</th>
+          <th>Open Sun</th><th>Open late</th><th>Score</th><th>Angle</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table></div>${complaints}`;
+    })
+    .join("");
+  $("marketDownloadBtn").onclick = () => downloadFile(`/api/market/${jobId}/csv`, `market-${jobId}.csv`);
+}
+
+function downloadFile(url, filename) {
+  fetch(url, { headers: authHeaders() })
+    .then((r) => r.blob())
+    .then((blob) => {
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = filename;
+      a.click();
+    });
+}
+
+// ---------------------------------------------------------------- Trends
+
+let trendId = null;
+let trendTimer = null;
+
+function showView(viewId) {
+  for (const tab of document.querySelectorAll(".tab")) {
+    tab.classList.toggle("active", tab.dataset.view === viewId);
+  }
+  $("leadsView").hidden = viewId !== "leadsView";
+  $("trendsView").hidden = viewId !== "trendsView";
+  try {
+    localStorage.setItem("webscrape_view", viewId);
+  } catch {
+    /* ignore */
+  }
+  if (viewId === "trendsView") loadTrendsHome();
+}
+
+async function loadTrendsHome() {
+  const { res, data } = await api("/api/trends");
+  if (!res.ok) return;
+  $("trendBtn").disabled = !data.available || Boolean(data.active);
+  if (data.available === false) {
+    $("trendStatus").textContent =
+      "Trends isn't installed on this server yet. It installs automatically with the next update.";
+  }
+  renderTrendRecent(data.trends || []);
+  const openId = data.active || trendId || data.trends?.[0]?.id;
+  if (openId) openTrend(openId);
+}
+
+function renderTrendRecent(trends) {
+  $("trendRecentPanel").hidden = trends.length === 0;
+  $("trendRecentList").innerHTML = trends
+    .map(
+      (t) => `<li><button type="button" class="recent-item" data-trend="${escapeHtml(t.id)}">
+        <span><strong>${escapeHtml(t.terms.slice(0, 4).join(", "))}${t.terms.length > 4 ? "…" : ""}</strong></span>
+        <span class="recent-meta">${escapeHtml(new Date(t.createdAt).toLocaleString())} ·
+          <span class="badge ${escapeHtml(t.status)}">${escapeHtml(t.status)}</span></span>
+      </button></li>`
+    )
+    .join("");
+}
+
+function openTrend(id) {
+  trendId = id;
+  clearInterval(trendTimer);
+  trendTimer = setInterval(pollTrend, 3000);
+  pollTrend();
+}
+
+async function pollTrend() {
+  if (!trendId) return;
+  const { res, data } = await api(`/api/trends/${trendId}`);
+  if (!res.ok) return;
+  const t = data.trend;
+  const running = t.status === "queued" || t.status === "running";
+  $("trendBtn").disabled = running;
+  if (running) {
+    const last = t.log?.[t.log.length - 1] || "Asking Google Trends…";
+    $("trendStatus").textContent = `Working… ${last.replace(/^\[.\]\s*/, "")}`;
+  } else if (t.status === "failed") {
+    $("trendStatus").textContent = `Failed: ${t.error || "unknown error"}`;
+  } else {
+    $("trendStatus").textContent = "";
+  }
+  if (!running) {
+    clearInterval(trendTimer);
+    if (t.status === "completed") renderTrend(t);
+  }
+}
+
+function sparkline(values) {
+  if (!values?.length) return "";
+  const w = 120;
+  const h = 28;
+  const max = Math.max(...values, 1);
+  const step = values.length > 1 ? w / (values.length - 1) : w;
+  const points = values.map((v, i) => `${(i * step).toFixed(1)},${(h - (v / max) * (h - 2) - 1).toFixed(1)}`);
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" aria-hidden="true">
+    <polyline points="${points.join(" ")}" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>`;
+}
+
+function renderTrend(t) {
+  const r = t.result;
+  if (!r?.summary?.length) return;
+  $("trendResults").hidden = false;
+  const period = { "today 3-m": "3 months", "today 12-m": "12 months", "today 5-y": "5 years" }[t.timeframe];
+  $("trendMeta").textContent = `· South Africa · last ${period || t.timeframe}`;
+  $("trendBody").innerHTML = r.summary
+    .map((row) => {
+      const dir = String(row.direction || "").toLowerCase();
+      const regions = (r.topRegions?.[row.term] || []).map((x) => x.region).join(", ") || "—";
+      const momentum = row.momentumPct === null ? "—" : `${row.momentumPct > 0 ? "+" : ""}${row.momentumPct}%`;
+      return `<tr>
+        <td data-label="Term"><div><strong>${escapeHtml(row.term)}</strong></div></td>
+        <td data-label="Direction"><div><span class="trend-badge ${escapeHtml(dir)}">${escapeHtml(
+          row.direction || "—"
+        )}</span></div></td>
+        <td data-label="Momentum"><div>${escapeHtml(momentum)}</div></td>
+        <td data-label="Trend"><div class="spark-wrap ${escapeHtml(dir)}">${sparkline(r.series?.[row.term])}</div></td>
+        <td data-label="Peak month"><div>${escapeHtml(row.peakMonth || "—")}</div></td>
+        <td data-label="Low month"><div>${escapeHtml(row.lowMonth || "—")}</div></td>
+        <td data-label="Top areas"><div>${escapeHtml(regions)}</div></td>
+      </tr>`;
+    })
+    .join("");
+  $("risingList").innerHTML = r.rising?.length
+    ? r.rising
+        .map(
+          (x) =>
+            `<li><strong>${escapeHtml(x.query)}</strong> <span class="muted-inline">(${escapeHtml(
+              x.term
+            )}, ${escapeHtml(String(x.growth))}${/^\d+$/.test(String(x.growth)) ? "%" : ""})</span></li>`
+        )
+        .join("")
+    : '<li class="muted-inline">No breakout searches for these terms.</li>';
+}
+
+async function startTrend() {
+  const terms = $("trendTerms").value;
+  $("trendBtn").disabled = true;
+  $("trendStatus").textContent = "Starting…";
+  const { res, data } = await api("/api/trends", {
+    method: "POST",
+    body: JSON.stringify({
+      terms,
+      timeframe: $("trendTimeframe").value,
+      resolution: $("trendResolution").value,
+    }),
+  });
+  if (!res.ok) {
+    $("trendStatus").textContent = data.error || "Could not start.";
+    $("trendBtn").disabled = false;
+    return;
+  }
+  $("trendResults").hidden = true;
+  openTrend(data.trend.id);
+  const list = await api("/api/trends");
+  if (list.res.ok) renderTrendRecent(list.data.trends || []);
+}
+
 function telLink(phone) {
   const digits = String(phone || "").replace(/[^\d+]/g, "");
   return digits.replace(/\D/g, "").length >= 9 ? `tel:${digits}` : "";
@@ -583,6 +801,14 @@ updateQueryCount();
 $("customCategories").addEventListener("input", updateQueryCount);
 $("suburbs").addEventListener("input", updateQueryCount);
 $("startBtn").addEventListener("click", startScrape);
+$("trendBtn").addEventListener("click", startTrend);
+for (const tab of document.querySelectorAll(".tab")) {
+  tab.addEventListener("click", () => showView(tab.dataset.view));
+}
+$("trendRecentList").addEventListener("click", (e) => {
+  const item = e.target.closest("[data-trend]");
+  if (item) openTrend(item.dataset.trend);
+});
 $("recentList").addEventListener("click", (e) => {
   const item = e.target.closest("[data-job]");
   if (!item) return;
