@@ -186,7 +186,7 @@ async function init() {
   } catch {
     /* ignore */
   }
-  if (view === "trendsView") showView(view);
+  if (view === "trendsView" || view === "instagramView") showView(view);
 
   // Reopen the running scan, or the latest one, so a reload never loses results.
   const resumeId = data.activeJob || currentJobId || jobs[0]?.id;
@@ -658,14 +658,238 @@ function showView(viewId) {
   for (const tab of document.querySelectorAll(".tab")) {
     tab.classList.toggle("active", tab.dataset.view === viewId);
   }
-  $("leadsView").hidden = viewId !== "leadsView";
-  $("trendsView").hidden = viewId !== "trendsView";
+  for (const id of ["leadsView", "trendsView", "instagramView"]) $(id).hidden = viewId !== id;
   try {
     localStorage.setItem("webscrape_view", viewId);
   } catch {
     /* ignore */
   }
   if (viewId === "trendsView") loadTrendsHome();
+  if (viewId === "instagramView") loadInstagramHome();
+}
+
+// ---------------------------------------------------------------- Instagram
+
+let igCheckId = null;
+let igTimer = null;
+let igConnected = false;
+
+function renderIgSettings(s) {
+  igConnected = Boolean(s.configured);
+  const pill = $("igStatus");
+  pill.textContent = s.configured ? `Connected${s.username ? ` as @${s.username}` : ""}` : "Not connected";
+  pill.className = `status-pill ${s.configured ? "ok" : ""}`;
+  $("igSetupSummary").textContent = s.configured
+    ? `Connected account (ID ${s.userId}, token ${s.tokenHint})${s.source === "env" ? " · set on the server" : ""}`
+    : "Connect your Instagram professional account";
+  $("igSetup").open = !s.configured;
+  $("igDisconnectBtn").hidden = !s.configured || s.source === "env";
+  if (s.configured) {
+    $("igUserId").value = s.userId || "";
+    $("igApiVersion").value = s.apiVersion || "";
+  }
+  updateIgRunButton();
+}
+
+function updateIgRunButton() {
+  const hasHandles = Number($("igScan").selectedOptions[0]?.dataset.handles || 0) > 0;
+  $("igRunBtn").disabled = !igConnected || !$("igScan").value || !hasHandles || Boolean(igTimer);
+}
+
+async function loadInstagramHome() {
+  const [settings, jobs, checks] = await Promise.all([
+    api("/api/instagram/settings"),
+    api("/api/jobs"),
+    api("/api/instagram"),
+  ]);
+  if (settings.res.ok) renderIgSettings(settings.data);
+
+  if (jobs.res.ok) {
+    const done = (jobs.data.jobs || []).filter((j) => j.status === "completed");
+    const current = $("igScan").value;
+    $("igScan").innerHTML = done.length
+      ? `<option value="">Choose a finished scan…</option>` +
+        done
+          .map(
+            (j) =>
+              `<option value="${escapeHtml(j.id)}">${escapeHtml(j.location)}${
+                j.suburbs?.length ? ` (${escapeHtml(j.suburbs.slice(0, 3).join(", "))}${j.suburbs.length > 3 ? "…" : ""})` : ""
+              } · ${escapeHtml(new Date(j.createdAt).toLocaleDateString())} · ${j.leadCount ?? 0} leads</option>`
+          )
+          .join("")
+      : `<option value="">No finished scans yet: run one on the Leads tab</option>`;
+    if (current && done.some((j) => j.id === current)) $("igScan").value = current;
+    if ($("igScan").value) await loadIgHandles();
+  }
+
+  if (checks.res.ok) {
+    renderIgRecent(checks.data.checks || []);
+    const openId = checks.data.active || igCheckId || checks.data.checks?.[0]?.id;
+    if (openId) openIgCheck(openId);
+  }
+}
+
+async function loadIgHandles() {
+  const scanId = $("igScan").value;
+  $("igHandles").innerHTML = "";
+  $("igHandlesInfo").textContent = "";
+  const option = $("igScan").selectedOptions[0];
+  if (!scanId) {
+    updateIgRunButton();
+    return;
+  }
+  const { res, data } = await api(`/api/instagram/handles/${scanId}`);
+  if (!res.ok) return;
+  const handles = data.handles || [];
+  option.dataset.handles = String(handles.length);
+  $("igHandlesInfo").textContent = handles.length
+    ? `${handles.length} business${handles.length === 1 ? "" : "es"} in this scan use an Instagram profile as their website:`
+    : "No business in this scan uses an Instagram profile as its website. Try a bigger scan (more suburbs or types).";
+  $("igHandles").innerHTML = handles
+    .slice(0, 60)
+    .map(
+      (h) =>
+        `<a class="chip" href="https://www.instagram.com/${encodeURIComponent(h.handle)}/" target="_blank" rel="noopener" title="${escapeHtml(
+          h.business_name || ""
+        )}">@${escapeHtml(h.handle)}</a>`
+    )
+    .join("");
+  updateIgRunButton();
+}
+
+function renderIgRecent(checks) {
+  $("igRecentPanel").hidden = checks.length === 0;
+  $("igRecentList").innerHTML = checks
+    .map(
+      (c) => `<li><button type="button" class="recent-item" data-ig="${escapeHtml(c.id)}">
+        <span><strong>${escapeHtml(c.location || "Scan")}</strong> <span class="muted-inline">${c.passed ?? 0} of ${
+        c.total ?? 0
+      } pass</span></span>
+        <span class="recent-meta">${escapeHtml(new Date(c.createdAt).toLocaleString())} ·
+          <span class="badge ${escapeHtml(c.status)}">${escapeHtml(c.status)}</span></span>
+      </button></li>`
+    )
+    .join("");
+}
+
+function openIgCheck(id) {
+  igCheckId = id;
+  clearInterval(igTimer);
+  igTimer = setInterval(pollIgCheck, 3000);
+  pollIgCheck();
+}
+
+async function pollIgCheck() {
+  if (!igCheckId) return;
+  const { res, data } = await api(`/api/instagram/${igCheckId}`);
+  if (res.status === 404) {
+    clearInterval(igTimer);
+    igTimer = null;
+    igCheckId = null;
+    return;
+  }
+  if (!res.ok) return;
+  const c = data.check;
+  const running = c.status === "queued" || c.status === "running";
+  $("igRunMsg").textContent = running
+    ? `Checking Instagram… ${c.done}/${c.total} accounts (${c.passed} pass so far)`
+    : c.status === "failed"
+      ? `Stopped: ${c.error || "unknown error"}`
+      : "";
+  if (!running) {
+    clearInterval(igTimer);
+    igTimer = null;
+  }
+  updateIgRunButton();
+  renderIgCheck(c);
+}
+
+function renderIgCheck(c) {
+  const rows = c.results || [];
+  $("igResults").hidden = rows.length === 0 && !(c.unresolved || []).length;
+  $("igMeta").textContent = `· ${c.location || ""} · ${c.passed} of ${c.total} pass (≥ ${Number(
+    c.minFollowers
+  ).toLocaleString("en-ZA")} followers${c.minEngagement ? `, ≥ ${c.minEngagement}% engagement` : ""})`;
+  $("igBody").innerHTML = rows
+    .map(
+      (r) => `<tr>
+        <td data-label="Account"><div>
+          <a href="https://www.instagram.com/${encodeURIComponent(r.handle)}/" target="_blank" rel="noopener"><strong>@${escapeHtml(
+            r.handle
+          )}</strong></a>${r.passes ? ' <span class="ig-pass">✓</span>' : ""}
+          <span class="lead-reasons">${escapeHtml(r.business_name || "")}</span></div></td>
+        <td data-label="Followers"><div><strong>${Number(r.followers || 0).toLocaleString("en-ZA")}</strong></div></td>
+        <td data-label="Engagement"><div>${r.engagement === null || r.engagement === undefined ? "—" : `${r.engagement}%`}${
+          r.note ? `<span class="lead-reasons">${escapeHtml(r.note)}</span>` : ""
+        }</div></td>
+        <td data-label="Posts"><div>${r.posts ?? "—"}</div></td>
+        <td data-label="Contact"><div>${
+          telLink(r.phone) ? `<a href="${escapeHtml(telLink(r.phone))}">${escapeHtml(r.phone)}</a>` : escapeHtml(r.phone || "—")
+        }${
+          safeUrl(r.whatsapp)
+            ? `<span class="lead-reasons"><a href="${escapeHtml(safeUrl(r.whatsapp))}" target="_blank" rel="noopener">WhatsApp</a></span>`
+            : ""
+        }</div></td>
+        <td data-label="Pitch"><div class="angle">${escapeHtml(r.pitch || "")}</div></td>
+      </tr>`
+    )
+    .join("");
+  const unresolved = c.unresolved || [];
+  $("igUnresolvedBox").hidden = unresolved.length === 0;
+  $("igUnresolvedSummary").textContent = `Couldn't look up ${unresolved.length} account${
+    unresolved.length === 1 ? "" : "s"
+  } (personal/private accounts or typos: check by hand)`;
+  $("igUnresolved").innerHTML = unresolved
+    .map(
+      (u) =>
+        `<li><a href="https://www.instagram.com/${encodeURIComponent(u.handle)}/" target="_blank" rel="noopener">@${escapeHtml(
+          u.handle
+        )}</a> <span class="muted-inline">${escapeHtml(u.business_name || "")} · ${escapeHtml(u.error || "")}</span></li>`
+    )
+    .join("");
+  $("igCsvBtn").onclick = () => downloadFile(`/api/instagram/${c.id}/csv`, `instagram-${c.id}.csv`);
+}
+
+async function saveIgSettings() {
+  $("igSaveBtn").disabled = true;
+  $("igSetupMsg").textContent = "Testing the connection with Meta…";
+  const { res, data } = await api("/api/instagram/settings", {
+    method: "POST",
+    body: JSON.stringify({
+      userId: $("igUserId").value,
+      token: $("igToken").value,
+      apiVersion: $("igApiVersion").value,
+    }),
+  });
+  $("igSaveBtn").disabled = false;
+  if (!res.ok) {
+    $("igSetupMsg").textContent = data.error || "Could not connect.";
+    return;
+  }
+  $("igToken").value = "";
+  $("igSetupMsg").textContent = "Connected.";
+  renderIgSettings(data);
+}
+
+async function startIgCheck() {
+  $("igRunBtn").disabled = true;
+  $("igRunMsg").textContent = "Starting…";
+  const { res, data } = await api("/api/instagram", {
+    method: "POST",
+    body: JSON.stringify({
+      scanId: $("igScan").value,
+      minFollowers: $("igMinFollowers").value,
+      minEngagement: $("igMinEngagement").value,
+    }),
+  });
+  if (!res.ok) {
+    $("igRunMsg").textContent = data.error || "Could not start.";
+    updateIgRunButton();
+    return;
+  }
+  openIgCheck(data.check.id);
+  const list = await api("/api/instagram");
+  if (list.res.ok) renderIgRecent(list.data.checks || []);
 }
 
 async function loadTrendsHome() {
@@ -839,6 +1063,19 @@ $("customCategories").addEventListener("input", updateQueryCount);
 $("suburbs").addEventListener("input", updateQueryCount);
 $("startBtn").addEventListener("click", startScrape);
 $("trendBtn").addEventListener("click", startTrend);
+$("igSaveBtn").addEventListener("click", saveIgSettings);
+$("igDisconnectBtn").addEventListener("click", async () => {
+  if (!confirm("Disconnect this Instagram account? The saved token is deleted from the server.")) return;
+  const { res, data } = await api("/api/instagram/settings", { method: "DELETE" });
+  if (res.ok) renderIgSettings(data);
+  else alert(data.error || "Could not disconnect.");
+});
+$("igScan").addEventListener("change", loadIgHandles);
+$("igRunBtn").addEventListener("click", startIgCheck);
+$("igRecentList").addEventListener("click", (e) => {
+  const item = e.target.closest("[data-ig]");
+  if (item) openIgCheck(item.dataset.ig);
+});
 $("stopBtn").addEventListener("click", async () => {
   if (!currentJobId || !confirm("Stop this scan? Businesses found so far are kept.")) return;
   $("stopBtn").disabled = true;

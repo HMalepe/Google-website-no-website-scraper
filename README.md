@@ -52,6 +52,24 @@ For South Africa it shows:
 It uses the unofficial `pytrends` library. Google rate-limits it, so if a check fails, wait 10–15
 minutes and try again. CLI: `pip install -r tools/requirements.txt`, then `python tools/trends.py`.
 
+## Instagram tab (free, Meta's official API)
+
+Businesses whose only "website" on Google Maps is an Instagram profile, ranked by followers and
+engagement. A big, engaged audience with no site of their own is the strongest pitch.
+
+1. Pick a finished scan. The Instagram handles found show straight away, with no Meta call.
+2. Connect once: Instagram **business/creator** account ID + access token from a free Meta
+   developer app (steps are on the tab). The token is stored on the server only. Alternatively
+   set `IG_USER_ID` / `IG_ACCESS_TOKEN` in `.env`.
+3. **Check Instagram** looks each handle up via Business Discovery: followers, posts, and
+   engagement (average likes + comments on the last 12 posts, as % of followers). It also writes
+   a pitch line and has a CSV download.
+
+Limits: only public business/creator accounts can be looked up (personal or private accounts
+are listed as "couldn't look up"). Meta allows about 200 lookups an hour; the check backs off
+automatically. Long-lived tokens expire after about 60 days; reconnect when Meta rejects it.
+Meta may require app review before Business Discovery works for other accounts.
+
 ## Go live (free or cheap VPS)
 
 **Start here:** [deploy/VPS-SETUP.md](deploy/VPS-SETUP.md)

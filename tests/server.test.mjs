@@ -2,6 +2,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { createServer } from "node:http";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, delimiter } from "node:path";
@@ -14,6 +15,34 @@ const PASSWORD = "correct-horse-battery";
 const DATA = mkdtempSync(join(tmpdir(), "webscrape-"));
 let server;
 let token;
+let graph;
+const GRAPH_PORT = PORT + 1;
+
+// Fake Meta Graph API: "<id>_salon" handles are business accounts, "private_*" can't be found.
+function startFakeGraph() {
+  graph = createServer((req, res) => {
+    const url = new URL(req.url, "http://x");
+    const fields = url.searchParams.get("fields") || "";
+    const send = (body) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(body));
+    };
+    if (url.searchParams.get("access_token") === "EAAG-bad-token-000000000") {
+      return send({ error: { code: 190, message: "Invalid OAuth access token" } });
+    }
+    if (fields === "username") return send({ id: "17841400000000001", username: "selantra_test" });
+    const handle = (fields.match(/business_discovery\.username\(([^)]+)\)/) || [])[1] || "";
+    if (handle.startsWith("private_")) return send({ error: { code: 110, message: "Invalid user id" } });
+    send({
+      business_discovery: {
+        followers_count: 12000,
+        media_count: 340,
+        media: { data: [{ like_count: 300, comments_count: 30 }, { like_count: 210, comments_count: 20 }] },
+      },
+    });
+  });
+  return new Promise((r) => graph.listen(GRAPH_PORT, "127.0.0.1", r));
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -45,6 +74,7 @@ before(async () => {
     JSON.stringify({ id: "deadbeef", status: "scraping", createdAt: "2026-01-01T00:00:00Z", log: [] })
   );
 
+  await startFakeGraph();
   server = spawn(process.execPath, ["server.mjs"], {
     cwd: ROOT,
     env: {
@@ -53,6 +83,8 @@ before(async () => {
       DATA_DIR: DATA,
       ACCESS_PASSWORD: PASSWORD,
       TRENDS_PYTHON: "python-that-does-not-exist",
+      IG_GRAPH_BASE: `http://127.0.0.1:${GRAPH_PORT}`,
+      IG_DELAY_MS: "0",
       PATH: `${join(ROOT, "tests", "fixtures", "bin")}${delimiter}${process.env.PATH}`,
     },
     stdio: "pipe",
@@ -69,7 +101,10 @@ before(async () => {
   throw new Error("server did not start");
 });
 
-after(() => server?.kill());
+after(() => {
+  server?.kill();
+  graph?.close();
+});
 
 test("login: wrong password rejected, token is not the password", async () => {
   assert.equal((await api("/api/jobs", { auth: false })).status, 401);
@@ -168,4 +203,49 @@ test("static files revalidate (deploys show without a hard refresh)", async () =
   assert.ok(etag);
   const again = await fetch(`${BASE}/app.js`, { headers: { "If-None-Match": etag } });
   assert.equal(again.status, 304);
+});
+
+test("instagram: connect, find handles, rank audiences, never leak the token", async () => {
+  const bad = await api("/api/instagram/settings", {
+    method: "POST",
+    body: { userId: "17841400000000001", token: "EAAG-bad-token-000000000" },
+  });
+  assert.equal(bad.status, 400);
+  assert.match(bad.data.error, /Meta said/);
+
+  const goodToken = "EAAG-good-token-1234567890";
+  const saved = await api("/api/instagram/settings", { method: "POST", body: { userId: "17841400000000001", token: goodToken } });
+  assert.equal(saved.status, 200);
+  assert.equal(saved.data.username, "selantra_test");
+  assert.ok(!JSON.stringify(saved.data).includes(goodToken), "token must never be sent back");
+  assert.ok(!JSON.stringify((await api("/api/instagram/settings")).data).includes(goodToken));
+
+  const { data: jobs } = await api("/api/jobs");
+  const scan = jobs.jobs.find((j) => j.status === "completed");
+  const { data: found } = await api(`/api/instagram/handles/${scan.id}`);
+  const handles = found.handles.map((h) => h.handle);
+  assert.ok(handles.some((h) => h.endsWith("_salon")), "instagram.com/<handle> website found");
+  assert.ok(handles.some((h) => h.startsWith("private_")), "bare instagram.com/<handle> found");
+
+  const start = await api("/api/instagram", { method: "POST", body: { scanId: scan.id, minFollowers: 3000 } });
+  assert.equal(start.status, 202);
+  let check;
+  for (let i = 0; i < 50; i++) {
+    check = (await api(`/api/instagram/${start.data.check.id}`)).data.check;
+    if (check.status !== "queued" && check.status !== "running") break;
+    await sleep(100);
+  }
+  assert.equal(check.status, "completed", check.error);
+  const hit = check.results.find((r) => r.handle.endsWith("_salon"));
+  assert.equal(hit.followers, 12000);
+  assert.equal(hit.engagement, 2.33); // (330 + 230) / 2 posts / 12000 followers
+  assert.equal(hit.passes, true);
+  assert.ok(check.unresolved.some((u) => u.handle.startsWith("private_")));
+
+  const csv = await fetch(`${BASE}/api/instagram/${check.id}/csv`, { headers: { Authorization: `Bearer ${token}` } });
+  assert.match(await csv.text(), /^passes,followers,engagement/);
+
+  assert.equal((await api("/api/instagram/settings", { method: "DELETE" })).data.configured, false);
+  const noCreds = await api("/api/instagram", { method: "POST", body: { scanId: scan.id } });
+  assert.equal(noCreds.status, 400);
 });
