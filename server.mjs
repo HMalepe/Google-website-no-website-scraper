@@ -15,6 +15,13 @@ import { fileURLToPath } from "node:url";
 import { randomUUID, createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { totalmem, cpus } from "node:os";
 import { buildLeadsPdf } from "./scripts/leads-pdf.mjs";
+import {
+  handlesFromLeads,
+  lookup as instagramLookup,
+  verifyAccount as verifyInstagram,
+  pitchHint,
+  InstagramTokenError,
+} from "./scripts/instagram.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = __dirname;
@@ -92,6 +99,15 @@ const TREND_TIMEOUT_MS = 20 * 60_000;
 let activeTrend = null;
 let trendsAvailable = null;
 
+// Instagram tab: Meta's official Business Discovery API (free, needs a token).
+const INSTAGRAM = join(DATA, "instagram");
+const SETTINGS = join(DATA, "settings");
+const INSTAGRAM_SETTINGS = join(SETTINGS, "instagram.json");
+const IG_GRAPH_BASE = process.env.IG_GRAPH_BASE || "https://graph.facebook.com";
+const IG_DELAY_MS = Number(process.env.IG_DELAY_MS ?? 600); // politeness gap between lookups
+const MAX_IG_HANDLES = 200; // Meta allows about 200 calls an hour per account
+let activeInstagram = null;
+
 const MIME = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -103,6 +119,7 @@ const MIME = {
 
 mkdirSync(JOBS, { recursive: true });
 mkdirSync(TRENDS, { recursive: true });
+mkdirSync(INSTAGRAM, { recursive: true });
 
 function json(res, status, body) {
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
@@ -849,6 +866,141 @@ async function runTrendJob(trend) {
  * failed so the dashboard doesn't wait on it forever, and remove scraper
  * containers left behind (they would keep using memory).
  */
+// ---------------------------------------------------------------- Instagram
+
+/** Credentials: env vars win (set by an admin), else what was saved in the dashboard. */
+function instagramSettings() {
+  if (process.env.IG_USER_ID && process.env.IG_ACCESS_TOKEN) {
+    return {
+      source: "env",
+      userId: process.env.IG_USER_ID,
+      token: process.env.IG_ACCESS_TOKEN,
+      apiVersion: process.env.IG_API_VERSION || "",
+      username: "",
+    };
+  }
+  if (!existsSync(INSTAGRAM_SETTINGS)) return null;
+  try {
+    return { source: "saved", ...JSON.parse(readFileSync(INSTAGRAM_SETTINGS, "utf8")) };
+  } catch {
+    return null;
+  }
+}
+
+/** Safe to show in the browser: never the token itself. */
+function publicInstagramSettings() {
+  const s = instagramSettings();
+  if (!s) return { configured: false };
+  return {
+    configured: true,
+    source: s.source,
+    userId: s.userId,
+    username: s.username || "",
+    apiVersion: s.apiVersion || "",
+    tokenHint: `${s.token.slice(0, 4)}…${s.token.slice(-4)}`,
+  };
+}
+
+function loadInstagramJob(id) {
+  const file = join(INSTAGRAM, id, "ig.json");
+  return existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : null;
+}
+
+function saveInstagramJob(job) {
+  mkdirSync(join(INSTAGRAM, job.id), { recursive: true });
+  writeFileSync(join(INSTAGRAM, job.id, "ig.json"), JSON.stringify(job, null, 2), "utf8");
+}
+
+function listInstagramJobs() {
+  return readdirSync(INSTAGRAM)
+    .map((id) => loadInstagramJob(id))
+    .filter(Boolean)
+    .sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""))
+    .slice(0, 10)
+    .map(({ id, scanId, location, status, createdAt, total, done, passed }) => ({
+      id, scanId, location, status, createdAt, total, done, passed,
+    }));
+}
+
+/** The Instagram handles in a scan's leads (profiles only, one per handle). */
+function scanHandles(scanId) {
+  return handlesFromLeads(csvToObjects(leadsFile(scanId))).slice(0, MAX_IG_HANDLES);
+}
+
+async function runInstagramJob(job, settings) {
+  job.status = "running";
+  job.startedAt = new Date().toISOString();
+  saveInstagramJob(job);
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  try {
+    for (const { handle, lead } of scanHandles(job.scanId)) {
+      if (job.stopRequested) break;
+      const res = await instagramLookup(handle, {
+        userId: settings.userId,
+        token: settings.token,
+        apiVersion: settings.apiVersion,
+        baseUrl: IG_GRAPH_BASE,
+      });
+      const contact = {
+        business_name: lead.business_name,
+        category: lead.category,
+        phone: lead.phone,
+        whatsapp: lead.whatsapp,
+        email: lead.email,
+        address: lead.address || lead.location,
+        google_maps_link: lead.google_maps_link,
+      };
+      if (res.ok) {
+        const followers = res.followers || 0;
+        const engagement = res.engagement;
+        job.results.push({
+          handle,
+          ...contact,
+          followers,
+          posts: res.posts,
+          engagement,
+          note: res.note,
+          pitch: pitchHint(followers, engagement),
+          passes: followers >= job.minFollowers && (engagement || 0) >= job.minEngagement,
+        });
+      } else {
+        job.unresolved.push({ handle, ...contact, error: res.error });
+      }
+      job.done++;
+      job.passed = job.results.filter((r) => r.passes).length;
+      saveInstagramJob(job);
+      await sleep(IG_DELAY_MS);
+    }
+    job.results.sort((a, b) => Number(b.passes) - Number(a.passes) || b.followers - a.followers);
+    job.status = "completed";
+  } catch (err) {
+    job.status = "failed";
+    job.error =
+      err instanceof InstagramTokenError
+        ? `Meta rejected the access token (${err.message}). Reconnect with a fresh token above; results found so far are kept.`
+        : err.message;
+  } finally {
+    job.finishedAt = new Date().toISOString();
+    activeInstagram = null;
+    saveInstagramJob(job);
+  }
+}
+
+const INSTAGRAM_CSV = [
+  "passes", "followers", "engagement", "posts", "handle", "business_name", "category",
+  "phone", "whatsapp", "email", "pitch", "note", "address", "google_maps_link",
+];
+
+function instagramCsv(job) {
+  const esc = (v) => {
+    const s = String(v ?? "");
+    return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const rows = job.results.map((r) => ({ ...r, passes: r.passes ? "yes" : "no", handle: `@${r.handle}` }));
+  return [INSTAGRAM_CSV.join(","), ...rows.map((r) => INSTAGRAM_CSV.map((h) => esc(r[h])).join(","))].join("\n") + "\n";
+}
+
 async function recoverInterruptedWork() {
   const now = new Date().toISOString();
   for (const job of listJobs()) {
@@ -866,6 +1018,14 @@ async function recoverInterruptedWork() {
     trend.error = "Interrupted: the server restarted during this check. Please run it again.";
     trend.finishedAt = trend.finishedAt || now;
     saveTrend(trend);
+  }
+  for (const id of readdirSync(INSTAGRAM)) {
+    const ig = loadInstagramJob(id);
+    if (!ig || !["queued", "running"].includes(ig.status)) continue;
+    ig.status = "failed";
+    ig.error = "Interrupted: the server restarted during this check. Results found so far are kept.";
+    ig.finishedAt = ig.finishedAt || now;
+    saveInstagramJob(ig);
   }
   try {
     const { stdout } = await runCommand("docker", ["ps", "-aq", "--filter", "name=^gmaps-"]);
@@ -1058,6 +1218,101 @@ const server = createServer(async (req, res) => {
         leads: csvToObjects(leadsFile(id)),
         summary: job.summary ?? null,
       });
+    }
+
+    if (url.pathname === "/api/instagram/settings") {
+      if (!requireAuth(req, res)) return;
+      if (req.method === "GET") return json(res, 200, publicInstagramSettings());
+      if (req.method === "DELETE") {
+        if (instagramSettings()?.source === "env") {
+          return json(res, 409, { error: "These details are set on the server (.env); remove them there." });
+        }
+        if (existsSync(INSTAGRAM_SETTINGS)) unlinkSync(INSTAGRAM_SETTINGS);
+        return json(res, 200, publicInstagramSettings());
+      }
+      if (req.method === "POST") {
+        const body = await readBody(req);
+        const userId = String(body.userId || "").trim();
+        const token = String(body.token || "").trim();
+        const apiVersion = String(body.apiVersion || "").trim();
+        if (!/^\d{5,25}$/.test(userId)) {
+          return json(res, 400, { error: "The Instagram account ID is a long number (e.g. 17841400000000000)." });
+        }
+        if (token.length < 20 || /\s/.test(token)) return json(res, 400, { error: "That access token doesn't look right." });
+        if (apiVersion && !/^v\d{1,3}\.\d$/.test(apiVersion)) {
+          return json(res, 400, { error: 'API version looks like "v23.0" (or leave it blank).' });
+        }
+        const check = await verifyInstagram({ userId, token, apiVersion, baseUrl: IG_GRAPH_BASE });
+        if (!check.ok) return json(res, 400, { error: `Meta said: ${check.error}` });
+        mkdirSync(SETTINGS, { recursive: true });
+        writeFileSync(
+          INSTAGRAM_SETTINGS,
+          JSON.stringify({ userId, token, apiVersion, username: check.username, savedAt: new Date().toISOString() }),
+          { encoding: "utf8", mode: 0o600 }
+        );
+        return json(res, 200, publicInstagramSettings());
+      }
+    }
+
+    if (req.method === "GET" && /^\/api\/instagram\/handles\/[a-f0-9]{8}$/.test(url.pathname)) {
+      if (!requireAuth(req, res)) return;
+      const scanId = url.pathname.split("/")[4];
+      if (!loadJob(scanId)) return json(res, 404, { error: "Scan not found" });
+      const handles = scanHandles(scanId).map(({ handle, lead }) => ({ handle, business_name: lead.business_name }));
+      return json(res, 200, { handles });
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/instagram") {
+      if (!requireAuth(req, res)) return;
+      return json(res, 200, { active: activeInstagram?.id ?? null, checks: listInstagramJobs() });
+    }
+
+    if (req.method === "GET" && /^\/api\/instagram\/[a-f0-9]{8}(\/csv)?$/.test(url.pathname)) {
+      if (!requireAuth(req, res)) return;
+      const id = routeId(url);
+      const job = activeInstagram?.id === id ? activeInstagram : loadInstagramJob(id);
+      if (!job) return json(res, 404, { error: "Not found" });
+      if (url.pathname.endsWith("/csv")) {
+        res.writeHead(200, {
+          "Content-Type": "text/csv; charset=utf-8",
+          "Content-Disposition": `attachment; filename="instagram-${id}.csv"`,
+        });
+        return res.end(instagramCsv(job));
+      }
+      return json(res, 200, { check: job });
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/instagram") {
+      if (!requireAuth(req, res)) return;
+      const settings = instagramSettings();
+      if (!settings) return json(res, 400, { error: "Connect your Instagram professional account first." });
+      if (activeInstagram) return json(res, 409, { error: "An Instagram check is already running.", id: activeInstagram.id });
+      const body = await readBody(req);
+      const scanId = String(body.scanId || "");
+      const scan = ID_PATTERN.test(scanId) ? loadJob(scanId) : null;
+      if (!scan) return json(res, 404, { error: "Pick a finished scan first." });
+      const total = scanHandles(scanId).length;
+      if (!total) return json(res, 400, { error: "This scan has no businesses with an Instagram profile as their website." });
+      if (activeInstagram) return json(res, 409, { error: "An Instagram check is already running.", id: activeInstagram.id });
+      const job = {
+        id: randomUUID().slice(0, 8),
+        scanId,
+        location: scan.location,
+        minFollowers: Math.max(0, Math.round(Number(body.minFollowers) || 0)),
+        minEngagement: Math.max(0, Number(body.minEngagement) || 0),
+        status: "queued",
+        createdAt: new Date().toISOString(),
+        total,
+        done: 0,
+        passed: 0,
+        results: [],
+        unresolved: [],
+        error: null,
+      };
+      saveInstagramJob(job);
+      activeInstagram = job;
+      runInstagramJob(job, settings);
+      return json(res, 202, { check: job });
     }
 
     if (req.method === "GET" && url.pathname === "/api/trends") {

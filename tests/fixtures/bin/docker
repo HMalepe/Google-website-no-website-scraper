@@ -39,7 +39,10 @@ for (const line of readFileSync(queriesHost, "utf8").split("\n").filter(Boolean)
       open_hours: JSON.stringify(hours),
       // mobile on even rows, landline on odd rows
       phone: i % 2 === 0 ? `082 000 00${i}${i}` : `011 000 00${i}${i}`,
-      website: weak ? "" : "https://example.co.za",
+      // In the poorly served area, two businesses use Instagram as their website.
+      website: weak
+        ? (i === 2 ? `https://www.instagram.com/${id}_salon/` : i === 4 ? `instagram.com/private_${id}` : "")
+        : "https://example.co.za",
       review_count: weak ? "30" : "400",
       review_rating: weak ? "3.9" : "4.7",
       complete_address: `${i} Main Rd`,

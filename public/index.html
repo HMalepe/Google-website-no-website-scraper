@@ -41,6 +41,7 @@
       <nav class="tabs" role="tablist">
         <button type="button" class="tab active" data-view="leadsView" role="tab">Leads</button>
         <button type="button" class="tab" data-view="trendsView" role="tab">Trends</button>
+        <button type="button" class="tab" data-view="instagramView" role="tab">Instagram</button>
       </nav>
 
       <div id="leadsView">
@@ -238,6 +239,91 @@
         <section class="panel recent-panel" id="trendRecentPanel" hidden>
           <h2>Recent trend checks</h2>
           <ul class="recent-list" id="trendRecentList"></ul>
+        </section>
+      </div>
+
+      <div id="instagramView" hidden>
+        <section class="panel">
+          <div class="results-head">
+            <h2>Instagram audience</h2>
+            <span class="status-pill" id="igStatus">Not connected</span>
+          </div>
+          <p class="hint ig-intro">
+            Businesses whose only "website" is an Instagram page, ranked by followers and engagement.
+            A big, engaged audience with no site of their own is your strongest pitch: proven demand,
+            no storefront they own. Uses Meta's official API (free), so only public
+            <strong>business/creator</strong> accounts can be looked up.
+          </p>
+
+          <details class="advanced" id="igSetup">
+            <summary id="igSetupSummary">Connect your Instagram professional account</summary>
+            <ol class="ig-steps">
+              <li>Switch an Instagram account you own to a <strong>Business</strong> or <strong>Creator</strong> account and link it to a Facebook Page.</li>
+              <li>At <strong>developers.facebook.com</strong>, create a free app and add the <strong>Instagram API</strong> (with Facebook Login).</li>
+              <li>In the Graph API Explorer, generate a token with <code>instagram_basic</code>, <code>pages_show_list</code> and <code>pages_read_engagement</code>, then exchange it for a long-lived token (lasts about 60 days).</li>
+              <li>Find your Instagram account ID: in the Explorer, query <code>me/accounts?fields=instagram_business_account</code>.</li>
+            </ol>
+            <p class="hint">Meta changes its review rules often: if lookups of other accounts fail, the app may need Meta's app review for Business Discovery.</p>
+            <div class="ig-form">
+              <label class="option ig-field"><span>Instagram account ID</span><input id="igUserId" inputmode="numeric" placeholder="17841400000000000" autocomplete="off" /></label>
+              <label class="option ig-field"><span>Access token</span><input id="igToken" type="password" placeholder="EAAG…" autocomplete="off" /></label>
+              <label class="option ig-field"><span>API version (optional)</span><input id="igApiVersion" placeholder="v23.0" autocomplete="off" /></label>
+            </div>
+            <div class="options-row">
+              <button class="btn btn-primary" id="igSaveBtn">Save &amp; test connection</button>
+              <button class="btn btn-ghost" id="igDisconnectBtn" hidden>Disconnect</button>
+            </div>
+            <p class="hint trend-status" id="igSetupMsg"></p>
+          </details>
+        </section>
+
+        <section class="panel">
+          <h2>Check a scan</h2>
+          <div class="options-row">
+            <label class="option ig-grow">
+              <span>Scan</span>
+              <select id="igScan"><option value="">Loading scans…</option></select>
+            </label>
+            <label class="option"><span>Min followers</span><input id="igMinFollowers" type="number" min="0" step="500" value="3000" class="ig-num" /></label>
+            <label class="option"><span>Min engagement %</span><input id="igMinEngagement" type="number" min="0" step="0.5" value="0" class="ig-num" /></label>
+          </div>
+          <p class="hint" id="igHandlesInfo"></p>
+          <div class="chips" id="igHandles"></div>
+          <div class="options-row">
+            <button class="btn btn-primary" id="igRunBtn" disabled>Check Instagram</button>
+          </div>
+          <p class="hint trend-status" id="igRunMsg"></p>
+        </section>
+
+        <section class="panel" id="igResults" hidden>
+          <div class="results-head">
+            <h2>Results <span class="muted-inline" id="igMeta"></span></h2>
+            <button class="btn btn-ghost btn-small" id="igCsvBtn">CSV</button>
+          </div>
+          <div class="table-wrap">
+            <table class="ig-table">
+              <thead>
+                <tr>
+                  <th>Account</th>
+                  <th>Followers</th>
+                  <th>Engagement</th>
+                  <th>Posts</th>
+                  <th>Contact</th>
+                  <th>Pitch</th>
+                </tr>
+              </thead>
+              <tbody id="igBody"></tbody>
+            </table>
+          </div>
+          <details class="advanced" id="igUnresolvedBox" hidden>
+            <summary id="igUnresolvedSummary">Couldn't look up</summary>
+            <ul class="rising-list" id="igUnresolved"></ul>
+          </details>
+        </section>
+
+        <section class="panel recent-panel" id="igRecentPanel" hidden>
+          <h2>Recent Instagram checks</h2>
+          <ul class="recent-list" id="igRecentList"></ul>
         </section>
       </div>
     </div>

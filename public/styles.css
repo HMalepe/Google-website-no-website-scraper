@@ -66,6 +66,61 @@ body {
   border-color: rgba(109, 94, 252, 0.55);
 }
 
+.ig-intro {
+  margin: 0 0 6px;
+}
+
+.ig-steps {
+  margin: 0 0 10px;
+  padding-left: 20px;
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.ig-steps code,
+.ig-intro code {
+  font-size: 12px;
+  background: var(--panel-2);
+  padding: 1px 5px;
+  border-radius: 6px;
+}
+
+.ig-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.ig-field {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.ig-grow {
+  flex: 1 1 260px;
+}
+
+.ig-grow select {
+  width: 100%;
+}
+
+.ig-num {
+  width: 110px;
+  padding: 10px 12px;
+}
+
+.ig-table {
+  min-width: 860px;
+}
+
+.ig-pass {
+  color: var(--accent-2);
+  font-weight: 700;
+}
+
 .download-actions {
   display: flex;
   align-items: center;
@@ -705,7 +760,8 @@ td a {
 
   table,
   .market-table,
-  .trend-table {
+  .trend-table,
+  .ig-table {
     min-width: 0;
   }
 

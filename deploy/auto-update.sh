@@ -55,6 +55,11 @@ if find "$DATA_DIR/trends" -name trend.json -mmin -10 2>/dev/null \
   echo "$(date -Is) update waiting: trends check in progress"
   exit 0
 fi
+if find "$DATA_DIR/instagram" -name ig.json -mmin -10 2>/dev/null \
+  | xargs -r grep -lE '"status": "(queued|running)"' | grep -q .; then
+  echo "$(date -Is) update waiting: instagram check in progress"
+  exit 0
+fi
 
 echo "$(date -Is) updating $(git rev-parse --short HEAD) -> $(git rev-parse --short origin/main)"
 git merge -q --ff-only origin/main || { echo "$(date -Is) merge failed"; exit 1; }
